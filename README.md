@@ -57,6 +57,13 @@ cd DynamicIsland
 swift build -c release
 ```
 
+### Restarting
+
+The app runs as a menu-bar agent. If you quit it from the menu, relaunch it with the
+**“Dynamic Island starten”** double-click starter on the Desktop (created by
+`./build_launcher.sh`, with its own app icon — drag it to the Dock for a permanent
+button), or just double-click `~/Applications/DynamicIsland.app`.
+
 ### Optional: AI assistant
 
 The assistant works two ways:

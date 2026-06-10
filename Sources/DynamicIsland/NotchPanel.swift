@@ -37,8 +37,6 @@ final class IslandContainerView: NSView {
     /// Returns the current island rect in this view's coordinate space.
     var islandRectProvider: (() -> CGRect)?
 
-    private var collapseWork: DispatchWorkItem?
-
     init(state: IslandState) {
         self.state = state
         super.init(frame: .zero)
@@ -47,51 +45,13 @@ final class IslandContainerView: NSView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    // MARK: Tracking
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        for area in trackingAreas { removeTrackingArea(area) }
-        let area = NSTrackingArea(
-            rect: bounds,
-            options: [.activeAlways, .mouseEnteredAndExited, .mouseMoved, .inVisibleRect],
-            owner: self, userInfo: nil
-        )
-        addTrackingArea(area)
-    }
-
-    override func mouseEntered(with event: NSEvent) { evaluate(event) }
-    override func mouseMoved(with event: NSEvent)   { evaluate(event) }
-    override func mouseExited(with event: NSEvent)  { setHover(false) }
-
-    private func evaluate(_ event: NSEvent) {
-        guard let rect = islandRectProvider?() else { return }
-        let p = convert(event.locationInWindow, from: nil)
-        setHover(rect.insetBy(dx: -6, dy: -6).contains(p))
-    }
-
-    private func setHover(_ hover: Bool) {
-        if hover {
-            collapseWork?.cancel()
-            collapseWork = nil
-            if !state.hovering { state.hovering = true }
-        } else {
-            guard state.hovering || state.pinnedOpen else { return }
-            collapseWork?.cancel()
-            let work = DispatchWorkItem { [weak self] in
-                guard let self else { return }
-                self.state.hovering = false
-                if !self.state.dragActive { self.state.pinnedOpen = false }
-            }
-            collapseWork = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
-        }
-    }
-
     // MARK: Click-through
 
+    /// Only intercept clicks while the island is actually expanded (only then are
+    /// there controls to click). Collapsed and peek are fully click-through, so the
+    /// panel never blocks the menu bar, windows, or buttons underneath — no ghost.
     override func hitTest(_ point: NSPoint) -> NSView? {
-        guard let rect = islandRectProvider?() else { return nil }
+        guard state.isExpanded, let rect = islandRectProvider?() else { return nil }
         let local = convert(point, from: superview)
         return rect.contains(local) ? super.hitTest(point) : nil
     }
@@ -106,6 +66,8 @@ final class IslandController {
     private let state: IslandState
     private let media: MediaController
     private let timer: TimerModel
+    private var hoverMonitors: [Any] = []
+    private var collapseWork: DispatchWorkItem?
 
     init(state: IslandState, media: MediaController, battery: BatteryMonitor,
          timer: TimerModel, shelf: ShelfModel, calendar: CalendarService,
@@ -158,7 +120,62 @@ final class IslandController {
 
         position()
         panel.orderFrontRegardless()
+        startHoverTracking()
     }
+
+    // MARK: Hover (global mouse tracking)
+
+    /// Drive expand/collapse from a global mouse monitor instead of an NSTrackingArea.
+    /// The monitor reports the cursor position reliably everywhere (other apps, other
+    /// Spaces, fast moves), so the island can never get "stuck" expanded.
+    private func startHoverTracking() {
+        let handler: (NSEvent) -> Void = { [weak self] _ in self?.evaluateHover() }
+        if let g = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved], handler: handler) {
+            hoverMonitors.append(g)
+        }
+        if let l = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved], handler: { event in
+            handler(event); return event
+        }) {
+            hoverMonitors.append(l)
+        }
+        hlog("monitors registered: \(hoverMonitors.count), islandRect(collapsed)=\(islandScreenRect())")
+    }
+
+    private static let debug = ProcessInfo.processInfo.environment["ISLAND_DEBUG"] == "1"
+    private func hlog(_ s: String) {
+        if Self.debug { FileHandle.standardError.write(("‹hover› " + s + "\n").data(using: .utf8)!) }
+    }
+
+    private func evaluateHover() {
+        let loc = NSEvent.mouseLocation                       // global, bottom-left
+        let inside = islandScreenRect().insetBy(dx: -10, dy: -10).contains(loc)
+        if inside {
+            collapseWork?.cancel(); collapseWork = nil
+            if !state.hovering { state.hovering = true; hlog("expand (cursor \(Int(loc.x)),\(Int(loc.y)))") }
+        } else {
+            // Outside: collapse after a short grace (hysteresis), unless already pending.
+            guard state.hovering || state.pinnedOpen, collapseWork == nil else { return }
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.state.hovering = false
+                if !self.state.dragActive { self.state.pinnedOpen = false }
+                self.collapseWork = nil
+                self.hlog("collapse")
+            }
+            collapseWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: work)
+        }
+    }
+
+    /// The island rect in global screen coordinates (matches the on-screen island).
+    private func islandScreenRect() -> CGRect {
+        let size = IslandLayout.currentSize(state: state, metrics: metrics, media: media, timer: timer)
+        return CGRect(x: metrics.notchCenterX - size.width / 2,
+                      y: metrics.screenTopY - size.height,
+                      width: size.width, height: size.height)
+    }
+
+    deinit { hoverMonitors.forEach { NSEvent.removeMonitor($0) } }
 
     /// The interactive island rect in the container's (bottom-left origin) coords.
     private func currentIslandRect() -> CGRect {
