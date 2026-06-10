@@ -70,9 +70,7 @@ On first use, macOS will prompt for Automation (Spotify/Music/Calendar), Camera 
 
 ## Screenshots
 
-Screenshots of the collapsed, compact peek, and expanded states (music, timer, shelf, calendar, assistant, recorder, to-dos, stocks, devices, and settings) live in the `Screenshots/` folder.
-
-_Note: a screenshot revealing a personal location is intentionally excluded via `.gitignore`._
+![Now-playing media wrapped around the MacBook notch](screenshots/demo.png)
 
 ## Project Status
 
