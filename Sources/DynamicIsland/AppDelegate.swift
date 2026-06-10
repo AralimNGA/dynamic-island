@@ -19,6 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var controller: IslandController?
     private var router: IslandCommandRouter?
+    private var systemControl: SystemControl?
     private var statusItem: NSStatusItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -45,6 +46,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                          todo: todo, settings: AppSettings.shared)
         self.router = router
         claude.onCommand = { [weak router] command in router?.handle(command) }
+
+        // The assistant's tool-execution layer (Island + Mac control).
+        let systemControl = SystemControl(router: router, media: media)
+        self.systemControl = systemControl
+        claude.systemControl = systemControl
 
         wireCallbacks()
         if env["ISLAND_SNAPSHOT"] == nil { media.start() }   // poller would overwrite injected demo state
@@ -126,6 +132,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + t) { NSApp.terminate(nil) }
         }
 
+        if let q = env["ISLAND_AI_TEST"] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in self?.claude.ask(q) }
+            if let mode = env["ISLAND_AI_CONFIRM"] {       // auto-respond to confirm cards
+                let t = Timer(timeInterval: 0.4, repeats: true) { [weak self] _ in
+                    guard let self, self.claude.pendingAction != nil else { return }
+                    FileHandle.standardError.write("‹ai› confirm-card -> \(mode)\n".data(using: .utf8)!)
+                    if mode == "allow" { self.claude.allowPending() } else { self.claude.denyPending() }
+                }
+                RunLoop.main.add(t, forMode: .common)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 14.0) { [weak self] in
+                guard let self else { return }
+                for t in self.claude.turns {
+                    FileHandle.standardError.write("‹ai› [\(t.role)] \(t.text)\n".data(using: .utf8)!)
+                    for b in t.blocks {
+                        if case let .toolUse(_, name, input) = b {
+                            FileHandle.standardError.write("‹ai›   →tool_use \(name) \(input)\n".data(using: .utf8)!)
+                        }
+                        if case let .toolResult(_, content, isErr) = b {
+                            FileHandle.standardError.write("‹ai›   ←result(err=\(isErr)) \(content.prefix(90))\n".data(using: .utf8)!)
+                        }
+                    }
+                }
+                NSApp.terminate(nil)
+            }
+        }
+
         if env["ISLAND_FORCE_EXPAND"] == "1" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
                 self?.state.pinnedOpen = true
@@ -134,7 +167,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if let dir = env["ISLAND_SNAPSHOT"], let controller {
             SnapshotRunner(dir: dir, state: state, media: media, timer: timer,
-                           shelf: shelf, todo: todo, view: controller.contentView).run()
+                           shelf: shelf, todo: todo, claude: claude, view: controller.contentView).run()
         }
 
         if let path = env["ISLAND_SETTINGS_SHOT"] {

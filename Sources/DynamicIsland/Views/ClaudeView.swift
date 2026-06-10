@@ -18,17 +18,18 @@ struct ClaudeView: View {
 
     private var conversation: some View {
         VStack(spacing: 6) {
+            chatHeader
             ScrollViewReader { proxy in
                 ScrollView(.vertical, showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 6) {
-                        if claude.turns.isEmpty {
+                        if claude.visibleTurns.isEmpty {
                             Text("Frag Claude etwas …")
                                 .font(.system(size: 12))
                                 .foregroundStyle(.white.opacity(0.4))
                                 .frame(maxWidth: .infinity, alignment: .center)
                                 .padding(.top, 8)
                         }
-                        ForEach(claude.turns) { bubble($0) }
+                        ForEach(claude.visibleTurns) { bubble($0) }
                         if claude.isLoading {
                             HStack { ProgressView().controlSize(.small); Spacer() }
                         }
@@ -44,9 +45,55 @@ struct ClaudeView: View {
                 .onChange(of: claude.turns.count) { withAnimation { proxy.scrollTo("bottom") } }
                 .onChange(of: claude.isLoading) { withAnimation { proxy.scrollTo("bottom") } }
             }
+            if let pending = claude.pendingAction {
+                PendingActionCard(action: pending,
+                                  onAllow: { claude.allowPending() },
+                                  onDeny: { claude.denyPending() })
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
             inputBar
         }
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: claude.pendingAction)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var chatHeader: some View {
+        HStack(spacing: 10) {
+            if !claude.archivedChats.isEmpty {
+                Menu {
+                    Section("Chats") {
+                        ForEach(claude.archivedChats) { chat in
+                            Button(chat.title.isEmpty ? "Chat" : chat.title) { claude.loadChat(chat) }
+                        }
+                    }
+                    Divider()
+                    Button("Verlauf leeren", role: .destructive) { claude.archivedChats.removeAll() }
+                } label: {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.6))
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Frühere Chats")
+            }
+            Spacer()
+            Text(claude.turns.isEmpty ? "Neuer Chat" : "Claude")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.4))
+            Spacer()
+            Button { claude.newChat() } label: {
+                Image(systemName: "square.and.pencil")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(claude.turns.isEmpty ? .white.opacity(0.25) : Color.accentColor)
+            }
+            .buttonStyle(.plain)
+            .disabled(claude.turns.isEmpty || claude.isLoading)
+            .help("Neuer Chat")
+        }
+        .frame(height: 18)
+        .padding(.horizontal, 2)
     }
 
     private func bubble(_ turn: ClaudeService.Turn) -> some View {
@@ -68,8 +115,9 @@ struct ClaudeView: View {
     }
 
     private var inputBar: some View {
-        HStack(spacing: 6) {
-            TextField("Nachricht …", text: $input)
+        let blocked = claude.isLoading || claude.pendingAction != nil
+        return HStack(spacing: 6) {
+            TextField(claude.pendingAction != nil ? "Erst bestätigen …" : "Nachricht …", text: $input)
                 .textFieldStyle(.plain)
                 .font(.system(size: 12))
                 .foregroundStyle(.white)
@@ -77,20 +125,22 @@ struct ClaudeView: View {
                 .padding(.horizontal, 10).padding(.vertical, 6)
                 .background(Capsule().fill(.white.opacity(0.10)))
                 .onSubmit(send)
+                .disabled(claude.pendingAction != nil)
 
             Button(action: send) {
                 Image(systemName: "arrow.up.circle.fill")
                     .font(.system(size: 20))
-                    .foregroundStyle(input.trimmingCharacters(in: .whitespaces).isEmpty
+                    .foregroundStyle(input.trimmingCharacters(in: .whitespaces).isEmpty || blocked
                                      ? .white.opacity(0.25) : Color.accentColor)
             }
             .buttonStyle(.plain)
-            .disabled(input.trimmingCharacters(in: .whitespaces).isEmpty || claude.isLoading)
+            .disabled(input.trimmingCharacters(in: .whitespaces).isEmpty || blocked)
         }
     }
 
     private func send() {
-        let text = input
+        let text = input.trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty, !claude.isLoading, claude.pendingAction == nil else { return }
         input = ""
         claude.ask(text)
     }

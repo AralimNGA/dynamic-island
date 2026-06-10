@@ -43,6 +43,8 @@ final class AppSettings: ObservableObject {
     @Published var enabledTabs: Set<String> { didSet { d.set(Array(enabledTabs), forKey: "enabledTabs") } }
     @Published var playlists: [Playlist] { didSet { savePlaylists() } }
     @Published var stockSymbols: [String] { didSet { d.set(stockSymbols, forKey: "stockSymbols") } }
+    /// Lets the assistant control the Mac (open apps/URLs, volume, etc.) via tools.
+    @Published var assistantMacControl: Bool { didSet { d.set(assistantMacControl, forKey: "assistantMacControl") } }
 
     private init() {
         aiProvider = AIProvider(rawValue: d.string(forKey: "aiProvider") ?? "") ?? .anthropic
@@ -63,6 +65,8 @@ final class AppSettings: ObservableObject {
             playlists = []
         }
         stockSymbols = (d.array(forKey: "stockSymbols") as? [String]) ?? ["AAPL", "MSFT", "NVDA"]
+        assistantMacControl = d.object(forKey: "assistantMacControl") != nil
+            ? d.bool(forKey: "assistantMacControl") : true
     }
 
     private func savePlaylists() {

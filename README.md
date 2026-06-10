@@ -10,7 +10,8 @@ Built with SwiftUI and AppKit, it ships as a Swift Package and builds with the C
 
 - **Native Dynamic Island** that wraps around the real MacBook Pro notch and morphs between collapsed, compact, and expanded states with spring animation.
 - **Now Playing** for Spotify and Apple Music via AppleScript: artwork, title/artist, play/pause/skip, a drag scrubber to seek, shuffle, loop, playlist switching, and a visualizer.
-- **AI assistant** in the notch — Anthropic's Claude API (model selectable) or a local model via LM Studio. The assistant can control the Island through `<<command>>` tokens (set timers, switch tabs, control music, add to-dos, change the accent color).
+- **Browser video Now Playing** — YouTube, Netflix, Vimeo, Twitch and more in Safari/Chrome/Brave/Edge/Arc. Shows the title, channel and thumbnail; with "Allow JavaScript from Apple Events" enabled it also gets a live scrubber and play/pause/skip from the Island.
+- **AI assistant** in the notch — Anthropic's Claude API (model selectable) or a local model via LM Studio. It runs a native **tool-use agent loop**: Claude can control the Island *and the Mac* — open apps and URLs, web search, volume/brightness, dark mode, notifications, screenshots, clipboard, timers, to-dos, music, and more. Dangerous actions (quit app, shell command, empty trash, lock) require an explicit **Allow/Deny** confirmation, and a prompt-injection guard re-gates otherwise-safe actions once untrusted tool output enters the context. Multiple chat sessions are supported.
 - **To-do list** with checkable items that the assistant can also populate.
 - **Weather** via Open-Meteo (location by IP, no API key required).
 - **Live stock quotes** via Yahoo Finance with freely configurable symbols.

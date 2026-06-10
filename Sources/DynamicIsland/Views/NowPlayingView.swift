@@ -9,52 +9,10 @@ struct NowPlayingView: View {
 
     var body: some View {
         if media.hasTrack {
-            VStack(spacing: 10) {
-                HStack(spacing: 12) {
-                    ArtworkView(image: media.artwork, accent: media.accent, cornerRadius: 8)
-                        .frame(width: 58, height: 58)
-                        .shadow(color: media.accent.opacity(0.5), radius: 8)
-
-                    VStack(alignment: .leading, spacing: 3) {
-                        Marquee(text: media.info.title,
-                                font: .system(size: 14, weight: .semibold))
-                            .frame(height: 18)
-                        Text(media.info.artist.isEmpty ? media.info.album : media.info.artist)
-                            .font(.system(size: 12))
-                            .foregroundStyle(.white.opacity(0.65))
-                            .lineLimit(1)
-                        Spacer(minLength: 0)
-                        sourceBadge
-                    }
-                    Spacer(minLength: 0)
-                }
-
-                scrubber
-
-                HStack(spacing: 18) {
-                    if media.info.app == "Spotify" {
-                        toggleButton("shuffle", active: media.info.shuffling) { media.toggleShuffle() }
-                    }
-                    controlButton("backward.fill", size: 15) { media.previous() }
-                    controlButton(media.isPlaying ? "pause.fill" : "play.fill", size: 22) { media.playPause() }
-                    controlButton("forward.fill", size: 15) { media.next() }
-                    repeatButton
-                }
-                .foregroundStyle(.white)
-
-                if media.info.app == "Spotify", !settings.playlists.isEmpty {
-                    Menu {
-                        ForEach(settings.playlists) { pl in
-                            Button(pl.name) { media.playURI(pl.uri) }
-                        }
-                    } label: {
-                        Label("Playlist wechseln", systemImage: "music.note.list")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(media.accent)
-                    }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
-                }
+            if media.info.isBrowser && !media.info.canSeek {
+                browserDisplay          // video without JS — centered, fills the space
+            } else {
+                standardPlayer          // music + browser-with-JS
             }
         } else if media.permissionDenied {
             VStack(spacing: 8) {
@@ -94,11 +52,101 @@ struct NowPlayingView: View {
         }
     }
 
+    /// Music and browser-with-JS: artwork on the left, controls below.
+    private var standardPlayer: some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 14) {
+                ArtworkView(image: media.artwork, accent: media.accent,
+                            cornerRadius: media.info.isBrowser ? 7 : 8)
+                    .frame(width: media.info.isBrowser ? 84 : 58,
+                           height: media.info.isBrowser ? 48 : 58)
+                    .shadow(color: media.accent.opacity(0.5), radius: 8)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Marquee(text: media.info.title, font: .system(size: 14, weight: .semibold))
+                        .frame(height: 18)
+                    Text(media.info.artist.isEmpty ? media.info.album : media.info.artist)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.white.opacity(0.65))
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    sourceBadge
+                }
+                Spacer(minLength: 0)
+            }
+
+            scrubber
+
+            HStack(spacing: media.info.isBrowser ? 12 : 18) {
+                if media.info.app == "Spotify" {
+                    toggleButton("shuffle", active: media.info.shuffling) { media.toggleShuffle() }
+                }
+                if media.info.isBrowser {
+                    controlButton("backward.end.fill", size: 13) { media.skipPrevious() }
+                }
+                controlButton(media.info.isBrowser ? "gobackward.10" : "backward.fill", size: 15) { media.previous() }
+                controlButton(media.isPlaying ? "pause.fill" : "play.fill", size: 22) { media.playPause() }
+                controlButton(media.info.isBrowser ? "goforward.10" : "forward.fill", size: 15) { media.next() }
+                if media.info.isBrowser {
+                    controlButton("forward.end.fill", size: 13) { media.skipNext() }
+                }
+                if !media.info.isBrowser { repeatButton }
+            }
+            .foregroundStyle(.white)
+
+            if media.info.app == "Spotify", !settings.playlists.isEmpty {
+                Menu {
+                    ForEach(settings.playlists) { pl in
+                        Button(pl.name) { media.playURI(pl.uri) }
+                    }
+                } label: {
+                    Label("Playlist wechseln", systemImage: "music.note.list")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(media.accent)
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+            }
+        }
+    }
+
+    /// Browser video without JS control: a big centered thumbnail in the free space.
+    private var browserDisplay: some View {
+        VStack(spacing: 12) {
+            Spacer(minLength: 0)
+            ArtworkView(image: media.artwork, accent: media.accent, cornerRadius: 10)
+                .frame(width: 148, height: 83)            // 16:9, cropped to the video frame
+                .shadow(color: media.accent.opacity(0.45), radius: 9, y: 3)
+            VStack(spacing: 4) {
+                Marquee(text: media.info.title, font: .system(size: 14, weight: .semibold))
+                    .frame(height: 18)
+                    .frame(maxWidth: 320)
+                HStack(spacing: 5) {
+                    Image(systemName: "play.rectangle.fill").font(.system(size: 9, weight: .bold))
+                    Text(media.info.album.isEmpty ? media.info.artist : media.info.album)
+                        .font(.system(size: 11, weight: .semibold))
+                }
+                .foregroundStyle(media.accent)
+            }
+            Text("Läuft im Browser · für Steuerung JavaScript aus Apple Events aktivieren")
+                .font(.system(size: 9))
+                .foregroundStyle(.white.opacity(0.3))
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 22)
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
     private var sourceBadge: some View {
-        HStack(spacing: 4) {
-            Image(systemName: media.info.app == "Spotify" ? "waveform" : "music.note")
+        let i = media.info
+        let icon = i.isBrowser ? "play.rectangle.fill" : (i.app == "Spotify" ? "waveform" : "music.note")
+        let label = i.isBrowser ? (i.album.isEmpty ? i.app : i.album) : i.app
+        return HStack(spacing: 4) {
+            Image(systemName: icon)
                 .font(.system(size: 9, weight: .bold))
-            Text(media.info.app)
+            Text(label)
                 .font(.system(size: 10, weight: .semibold))
         }
         .foregroundStyle(media.accent)

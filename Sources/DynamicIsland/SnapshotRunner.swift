@@ -9,16 +9,18 @@ final class SnapshotRunner {
     private let timer: TimerModel
     private let shelf: ShelfModel
     private let todo: TodoModel
+    private let claude: ClaudeService
     private let view: NSView
 
     init(dir: String, state: IslandState, media: MediaController, timer: TimerModel,
-         shelf: ShelfModel, todo: TodoModel, view: NSView) {
+         shelf: ShelfModel, todo: TodoModel, claude: ClaudeService, view: NSView) {
         self.dir = dir
         self.state = state
         self.media = media
         self.timer = timer
         self.shelf = shelf
         self.todo = todo
+        self.claude = claude
         self.view = view
     }
 
@@ -29,6 +31,29 @@ final class SnapshotRunner {
                                    artist: "The Weeknd", album: "After Hours",
                                    isPlaying: true, duration: 200, position: 82, artworkURL: "",
                                    shuffling: true, repeating: false)
+
+        var fakeVideoJS = NowPlaying(app: "Safari", title: "H Y P E (Official Video)",
+                                     artist: "The Midnight", album: "YouTube",
+                                     isPlaying: true, duration: 243, position: 95, artworkURL: "")
+        fakeVideoJS.isBrowser = true; fakeVideoJS.canSeek = true
+
+        var fakeVideoNoJS = NowPlaying(app: "Safari", title: "H Y P E (Official Video)",
+                                       artist: "YouTube", album: "YouTube",
+                                       isPlaying: true, artworkURL: "")
+        fakeVideoNoJS.isBrowser = true; fakeVideoNoJS.canSeek = false
+
+        // A stand-in 16:9 thumbnail so the artwork reads like a video frame.
+        let thumb = NSImage(size: NSSize(width: 192, height: 108))
+        thumb.lockFocus()
+        NSGradient(colors: [
+            NSColor(calibratedRed: 0.20, green: 0.10, blue: 0.35, alpha: 1),
+            NSColor(calibratedRed: 0.55, green: 0.18, blue: 0.40, alpha: 1),
+        ])!.draw(in: NSRect(x: 0, y: 0, width: 192, height: 108), angle: -45)
+        NSColor(white: 1, alpha: 0.92).setFill()
+        let p = NSBezierPath()
+        p.move(to: NSPoint(x: 84, y: 38)); p.line(to: NSPoint(x: 84, y: 70))
+        p.line(to: NSPoint(x: 114, y: 54)); p.close(); p.fill()
+        thumb.unlockFocus()
 
         let steps: [(String, () -> Void)] = [
             ("1_collapsed", {
@@ -85,6 +110,37 @@ final class SnapshotRunner {
                     self.todo.items[2].done = true
                 }
                 self.state.selectedTab = .todo
+            }),
+            ("13_video_js", {
+                self.media.info = fakeVideoJS
+                self.media.artwork = thumb
+                self.media.accent = .purple
+                self.state.selectedTab = .nowPlaying
+            }),
+            ("14_video_nojs", {
+                self.media.info = fakeVideoNoJS
+                self.media.artwork = thumb
+                self.media.accent = .purple
+                self.state.selectedTab = .nowPlaying
+            }),
+            ("15_video_peek", {
+                self.state.pinnedOpen = false
+                self.media.info = fakeVideoNoJS
+                self.media.artwork = thumb
+                self.media.accent = .purple
+                self.media.showMediaPeek = true
+            }),
+            ("16_ai_pending", {
+                self.state.pinnedOpen = true
+                self.media.showMediaPeek = false
+                self.claude.turns = [
+                    .init(role: "user", text: "Leere bitte den Papierkorb"),
+                    .init(role: "assistant", text: "Klar, ich leere den Papierkorb für dich."),
+                ]
+                self.claude.pendingAction = .init(toolName: "empty_trash",
+                                                  title: "Papierkorb leeren?",
+                                                  detail: "Das lässt sich nicht rückgängig machen.")
+                self.state.selectedTab = .claude
             }),
         ]
 

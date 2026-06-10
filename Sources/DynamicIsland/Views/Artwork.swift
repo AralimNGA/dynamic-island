@@ -41,6 +41,9 @@ struct Marquee: View {
     @State private var textWidth: CGFloat = 0
     @State private var containerWidth: CGFloat = 0
 
+    /// True only when the text is too long to fit (then it scrolls + fades).
+    private var overflowing: Bool { textWidth > containerWidth + 4 }
+
     var body: some View {
         GeometryReader { geo in
             Text(text)
@@ -52,9 +55,16 @@ struct Marquee: View {
                 .offset(x: offset)
                 .onAppear { containerWidth = geo.size.width; restart() }
                 .onChange(of: text) { restart() }
+                .onChange(of: geo.size.width) { containerWidth = geo.size.width; restart() }
         }
         .clipped()
-        .mask(
+        .mask(edgeMask)
+    }
+
+    /// Fade the edges only while scrolling — otherwise show the whole text so the
+    /// first letter is never hidden behind the leading gradient.
+    @ViewBuilder private var edgeMask: some View {
+        if overflowing {
             LinearGradient(
                 stops: [
                     .init(color: .clear, location: 0),
@@ -64,7 +74,9 @@ struct Marquee: View {
                 ],
                 startPoint: .leading, endPoint: .trailing
             )
-        )
+        } else {
+            Color.black
+        }
     }
 
     private var widthReader: some View {

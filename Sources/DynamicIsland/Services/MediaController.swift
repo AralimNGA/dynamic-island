@@ -3,10 +3,10 @@ import SwiftUI
 import Combine
 
 struct NowPlaying: Equatable {
-    var app: String = ""          // "Spotify" | "Music"
+    var app: String = ""          // "Spotify" | "Music" | a browser name
     var title: String = ""
     var artist: String = ""
-    var album: String = ""
+    var album: String = ""        // for browser: the site name (YouTube, Netflix…)
     var isPlaying: Bool = false
     var duration: Double = 0      // seconds
     var position: Double = 0      // seconds
@@ -14,6 +14,8 @@ struct NowPlaying: Equatable {
     var shuffling = false
     var repeating = false
     var trackURI = ""
+    var isBrowser = false         // a video playing in a web browser
+    var canSeek = true            // false for a browser video without JS access (display-only)
 
     var hasTrack: Bool { !title.isEmpty }
     var trackKey: String { app + "|" + title + "|" + artist }
@@ -82,30 +84,59 @@ final class MediaController: ObservableObject {
         return set
     }
 
+    /// Browsers we can read a playing `<video>` from via AppleScript.
+    private static let browsers: [(name: String, bundle: String, safari: Bool)] = [
+        ("Safari",         "com.apple.Safari",        true),
+        ("Google Chrome",  "com.google.Chrome",       false),
+        ("Brave Browser",  "com.brave.Browser",       false),
+        ("Microsoft Edge", "com.microsoft.edgemac",   false),
+        ("Arc",            "company.thebrowser.Browser", false),
+        ("Vivaldi",        "com.vivaldi.Vivaldi",     false),
+        ("Opera",          "com.operasoftware.Opera", false),
+    ]
+
+    private func runningBrowsers() -> [(name: String, bundle: String, safari: Bool)] {
+        let ids = Set(NSWorkspace.shared.runningApplications.compactMap { $0.bundleIdentifier })
+        return Self.browsers.filter { ids.contains($0.bundle) }
+    }
+
     @Published var permissionDenied = false   // Automation (Apple Events) was refused
     @Published var anyAppRunning = false      // a media app is open right now
 
     func poll() {
         let apps = runningMediaApps()
-        Self.log("running media apps: \(apps.sorted())")
-        let running = !apps.isEmpty
+        let browsers = runningBrowsers()
+        let frontBundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
+        Self.log("running media apps: \(apps.sorted()) browsers: \(browsers.map { $0.name })")
+        let running = !apps.isEmpty || !browsers.isEmpty
         if anyAppRunning != running { anyAppRunning = running }
+        let currentApp = info.app
         queue.async { [weak self] in
             guard let self else { return }
-            var best: NowPlaying?
-            if apps.contains("Spotify"), let r = self.querySpotify(), r.hasTrack {
-                best = r
-            }
-            if apps.contains("Music"), let r = self.queryMusic(), r.hasTrack {
-                // Prefer whichever is actually playing.
-                if r.isPlaying || best == nil || !(best?.isPlaying ?? false) {
-                    if r.isPlaying || best == nil { best = r }
+            var candidates: [NowPlaying] = []
+            if apps.contains("Spotify"), let r = self.querySpotify(), r.hasTrack { candidates.append(r) }
+            if apps.contains("Music"), let r = self.queryMusic(), r.hasTrack { candidates.append(r) }
+            for b in browsers {
+                if let r = self.queryBrowser(b.name, safari: b.safari, frontmost: b.bundle == frontBundle) {
+                    candidates.append(r)
                 }
             }
-            let resolved = best ?? NowPlaying()
-            Self.log("resolved: app=\(resolved.app) title=\(resolved.title) playing=\(resolved.isPlaying)")
+            let resolved = self.pick(candidates, current: currentApp)
+            Self.log("resolved: app=\(resolved.app) title=\(resolved.title) playing=\(resolved.isPlaying) browser=\(resolved.isBrowser)")
             DispatchQueue.main.async { self.apply(resolved) }
         }
+    }
+
+    /// Choose the source to show: keep the current one if it's still playing
+    /// (anti-flicker), otherwise prefer a playing music app, then any playing
+    /// source (a browser video), then whatever has a track.
+    private func pick(_ candidates: [NowPlaying], current: String) -> NowPlaying {
+        guard !candidates.isEmpty else { return NowPlaying() }
+        if let same = candidates.first(where: { $0.app == current && $0.isPlaying }) { return same }
+        if let music = candidates.first(where: { $0.isPlaying && !$0.isBrowser }) { return music }
+        if let playing = candidates.first(where: { $0.isPlaying }) { return playing }
+        if let same = candidates.first(where: { $0.app == current }) { return same }
+        return candidates.first ?? NowPlaying()
     }
 
     private func apply(_ np: NowPlaying) {
@@ -113,9 +144,16 @@ final class MediaController: ObservableObject {
         info = np
         updateMediaPeek(np)
 
-        if np.app == "Spotify", np.artworkURL != lastArtworkURL {
-            lastArtworkURL = np.artworkURL
-            loadArtwork(from: np.artworkURL)
+        if !np.artworkURL.isEmpty {
+            if np.artworkURL != lastArtworkURL {
+                lastArtworkURL = np.artworkURL
+                loadArtwork(from: np.artworkURL)
+            }
+        } else if np.app != "Music", np.hasTrack, !lastArtworkURL.isEmpty {
+            // Moved to a source without art (e.g. a non-YouTube video) → clear it.
+            lastArtworkURL = ""
+            artwork = nil
+            accent = Color(white: 0.4)
         }
         if !np.hasTrack {
             artwork = nil
@@ -175,16 +213,49 @@ final class MediaController: ObservableObject {
 
     // MARK: - Transport controls
 
-    func playPause() { send("playpause"); refreshSoon() }
-    func play()      { send("play"); refreshSoon() }
-    func pause()     { send("pause"); refreshSoon() }
-    func next()      { send("next track"); deferRelock() }
-    func previous()  { send("previous track"); deferRelock() }
+    func playPause() {
+        if info.isBrowser { browserCommand("var v=document.querySelector('video');if(v){if(v.paused){v.play()}else{v.pause()}}") }
+        else { send("playpause") }
+        refreshSoon()
+    }
+    func play() {
+        if info.isBrowser { browserCommand("var v=document.querySelector('video');if(v){v.play()}") }
+        else { send("play") }
+        refreshSoon()
+    }
+    func pause() {
+        if info.isBrowser { browserCommand("var v=document.querySelector('video');if(v){v.pause()}") }
+        else { send("pause") }
+        refreshSoon()
+    }
+    func next() {
+        if info.isBrowser { browserCommand("var v=document.querySelector('video');if(v){v.currentTime=Math.min(v.duration||1e9,v.currentTime+10)}"); refreshSoon() }
+        else { send("next track"); deferRelock() }
+    }
+    func previous() {
+        if info.isBrowser { browserCommand("var v=document.querySelector('video');if(v){v.currentTime=Math.max(0,v.currentTime-10)}"); refreshSoon() }
+        else { send("previous track"); deferRelock() }
+    }
+    /// Skip to the next item — next video on YouTube, next track on Spotify/Music.
+    func skipNext() {
+        if info.isBrowser {
+            browserCommand("var b=document.querySelector('.ytp-next-button');if(b&&b.getAttribute('aria-disabled')!=='true'){b.click()}else{var v=document.querySelector('video');if(v)v.currentTime=v.duration}")
+            refreshSoon()
+        } else { next() }
+    }
+    /// Skip to the previous item — previous video on YouTube, previous track otherwise.
+    func skipPrevious() {
+        if info.isBrowser {
+            browserCommand("var b=document.querySelector('.ytp-prev-button');if(b&&b.getAttribute('aria-disabled')!=='true'){b.click()}else{var v=document.querySelector('video');if(v)v.currentTime=0}")
+            refreshSoon()
+        } else { previous() }
+    }
     func setShuffle(_ on: Bool) { spotify("set shuffling to \(on)"); refreshSoon() }
 
     /// Seek to an absolute position (seconds) — used by the draggable scrubber.
     func seek(to seconds: Double) {
-        seekRaw(seconds)
+        if info.isBrowser { browserCommand("var v=document.querySelector('video');if(v){v.currentTime=\(Int(max(0, seconds)))}") }
+        else { seekRaw(seconds) }
         info.position = max(0, seconds)   // optimistic
     }
 
@@ -334,6 +405,147 @@ final class MediaController: ObservableObject {
         np.position = Double(parts[5]) ?? 0
         np.artworkURL = ""                      // Apple Music artwork isn't URL-addressable
         return np
+    }
+
+    // MARK: - Browser video (YouTube, Netflix, …)
+
+    /// Reads the active tab's `<video>` element. Uses only single quotes and no
+    /// backslashes so it can be embedded inside an AppleScript double-quoted string.
+    private static let videoJS = "(function(){var v=document.querySelector('video');if(!v)return '';var d=isFinite(v.duration)?Math.floor(v.duration):0;var p=(!v.paused&&!v.ended)?'1':'0';var ce=document.querySelector('ytd-channel-name a');var c=ce?ce.textContent.trim():'';return [p,document.title,c,Math.floor(v.currentTime||0),d].join(String.fromCharCode(10));})()"
+
+    /// True when the current source is a browser video (vs Spotify/Music).
+    var isBrowserSource: Bool { info.isBrowser }
+
+    /// Queries one browser's front tab. With "Allow JavaScript from Apple Events"
+    /// enabled we get the live play state + progress; otherwise we still surface the
+    /// title + thumbnail of the video the user is actively watching (front browser).
+    private func queryBrowser(_ name: String, safari: Bool, frontmost: Bool) -> NowPlaying? {
+        let js = Self.videoJS
+        let getURL   = safari ? "URL of current tab of front window"  : "URL of active tab of front window"
+        let getTitle = safari ? "name of current tab of front window" : "title of active tab of front window"
+        let exec     = safari ? "do JavaScript \"\(js)\" in current tab of front window"
+                              : "execute (active tab of front window) javascript \"\(js)\""
+        let src = """
+        if application "\(name)" is running then
+          tell application "\(name)"
+            try
+              if (count of windows) is 0 then return ""
+              set u to \(getURL)
+              set ti to \(getTitle)
+              set r to ""
+              try
+                set r to (\(exec))
+              end try
+              return u & linefeed & ti & linefeed & r
+            on error
+              return ""
+            end try
+          end tell
+        end if
+        """
+        guard let out = runScript(src), !out.isEmpty else { return nil }
+        let lines = out.components(separatedBy: "\n")
+        guard lines.count >= 2 else { return nil }
+        let url = lines[0]
+        let tabTitle = lines[1]
+        Self.log("browser \(name): front=\(frontmost) jsLines=\(lines.count) url=\(url)")
+
+        // JS path: url, title, then [playing, jsTitle, channel, pos, dur].
+        if lines.count >= 7, lines[2] == "0" || lines[2] == "1" {
+            var np = NowPlaying()
+            np.app = name
+            np.isBrowser = true
+            np.canSeek = (Double(lines[6]) ?? 0) > 0   // 0 for live streams → display-only
+            np.isPlaying = lines[2] == "1"
+            np.title = cleanVideoTitle(lines[3].isEmpty ? tabTitle : lines[3])
+            let site = siteName(from: url)
+            np.artist = lines[4].isEmpty ? site : lines[4]
+            np.album = site
+            np.position = Double(lines[5]) ?? 0
+            np.duration = Double(lines[6]) ?? 0
+            np.artworkURL = youtubeThumbnail(from: url)
+            return np.hasTrack ? np : nil
+        }
+
+        // No JS: only show the video the user is actively looking at.
+        guard frontmost, isVideoURL(url) else { return nil }
+        var np = NowPlaying()
+        np.app = name
+        np.isBrowser = true
+        np.canSeek = false
+        np.isPlaying = true          // optimistic — real state needs JS
+        np.title = cleanVideoTitle(tabTitle)
+        np.album = siteName(from: url)
+        np.artist = np.album
+        np.artworkURL = youtubeThumbnail(from: url)
+        return np.hasTrack ? np : nil
+    }
+
+    /// Runs a tiny JS snippet against the current browser source's front tab.
+    private func browserCommand(_ js: String) {
+        guard info.isBrowser else { return }
+        let app = info.app
+        let safari = app == "Safari"
+        let wrapped = "(function(){\(js)})()"
+        let exec = safari ? "do JavaScript \"\(wrapped)\" in current tab of front window"
+                          : "execute (active tab of front window) javascript \"\(wrapped)\""
+        let src = """
+        if application "\(app)" is running then
+          tell application "\(app)"
+            try
+              \(exec)
+            end try
+          end tell
+        end if
+        """
+        queue.async { [weak self] in _ = self?.runScript(src) }
+    }
+
+    private func cleanVideoTitle(_ t: String) -> String {
+        var s = t
+        for suffix in [" - YouTube", " - YouTube Music", " on Vimeo", " | Netflix", " - Twitch"] {
+            if s.hasSuffix(suffix) { s = String(s.dropLast(suffix.count)) }
+        }
+        if let r = s.range(of: #"^\(\d+\)\s*"#, options: .regularExpression) { s.removeSubrange(r) }
+        return s.trimmingCharacters(in: .whitespaces)
+    }
+
+    private func siteName(from url: String) -> String {
+        guard let host = URL(string: url)?.host?.replacingOccurrences(of: "www.", with: "") else { return "Video" }
+        let map = ["youtube.com": "YouTube", "youtu.be": "YouTube", "music.youtube.com": "YouTube Music",
+                   "netflix.com": "Netflix", "vimeo.com": "Vimeo", "twitch.tv": "Twitch",
+                   "disneyplus.com": "Disney+", "primevideo.com": "Prime Video",
+                   "tv.apple.com": "Apple TV", "dailymotion.com": "Dailymotion"]
+        if let n = map[host] { return n }
+        let first = host.split(separator: ".").first.map(String.init) ?? host
+        return first.prefix(1).uppercased() + first.dropFirst()
+    }
+
+    private func isVideoURL(_ url: String) -> Bool {
+        guard let comps = URLComponents(string: url),
+              let host = comps.host?.replacingOccurrences(of: "www.", with: "") else { return false }
+        if host.contains("youtube.com") {
+            return comps.path == "/watch" || comps.path.hasPrefix("/shorts/") || comps.path.hasPrefix("/live/")
+        }
+        if host == "youtu.be" { return comps.path.count > 1 }
+        let hosts = ["music.youtube.com", "netflix.com", "vimeo.com", "twitch.tv",
+                     "disneyplus.com", "primevideo.com", "tv.apple.com", "dailymotion.com"]
+        return hosts.contains { host == $0 || host.hasSuffix("." + $0) }
+    }
+
+    private func youtubeThumbnail(from url: String) -> String {
+        guard let comps = URLComponents(string: url) else { return "" }
+        let host = comps.host?.replacingOccurrences(of: "www.", with: "") ?? ""
+        var id = ""
+        if host.contains("youtube.com") {
+            if comps.path == "/watch" { id = comps.queryItems?.first(where: { $0.name == "v" })?.value ?? "" }
+            else if comps.path.hasPrefix("/shorts/") { id = String(comps.path.dropFirst("/shorts/".count)) }
+            else if comps.path.hasPrefix("/live/") { id = String(comps.path.dropFirst("/live/".count)) }
+        } else if host == "youtu.be" {
+            id = String(comps.path.dropFirst())
+        }
+        id = id.split(separator: "/").first.map(String.init) ?? id
+        return id.isEmpty ? "" : "https://i.ytimg.com/vi/\(id)/hqdefault.jpg"
     }
 
     static let debug = ProcessInfo.processInfo.environment["ISLAND_DEBUG"] == "1"
