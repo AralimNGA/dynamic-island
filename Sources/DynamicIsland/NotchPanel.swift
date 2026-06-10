@@ -93,7 +93,7 @@ final class IslandController {
         panel.isMovable = false
         panel.isMovableByWindowBackground = false
         panel.isReleasedWhenClosed = false
-        panel.ignoresMouseEvents = false
+        panel.ignoresMouseEvents = true   // click-through by default; toggled when the cursor is over the island
         panel.acceptsMouseMovedEvents = true
         panel.hidesOnDeactivate = false
 
@@ -129,11 +129,12 @@ final class IslandController {
     /// The monitor reports the cursor position reliably everywhere (other apps, other
     /// Spaces, fast moves), so the island can never get "stuck" expanded.
     private func startHoverTracking() {
+        let events: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDragged]
         let handler: (NSEvent) -> Void = { [weak self] _ in self?.evaluateHover() }
-        if let g = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved], handler: handler) {
+        if let g = NSEvent.addGlobalMonitorForEvents(matching: events, handler: handler) {
             hoverMonitors.append(g)
         }
-        if let l = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved], handler: { event in
+        if let l = NSEvent.addLocalMonitorForEvents(matching: events, handler: { event in
             handler(event); return event
         }) {
             hoverMonitors.append(l)
@@ -149,6 +150,12 @@ final class IslandController {
     private func evaluateHover() {
         let loc = NSEvent.mouseLocation                       // global, bottom-left
         let inside = islandScreenRect().insetBy(dx: -10, dy: -10).contains(loc)
+
+        // The real click-through control: ignore mouse events unless the cursor is
+        // actually over the island. Returning nil from hitTest does NOT make a
+        // window click-through on macOS — this does.
+        if panel.ignoresMouseEvents == inside { panel.ignoresMouseEvents = !inside }
+
         if inside {
             collapseWork?.cancel(); collapseWork = nil
             if !state.hovering { state.hovering = true; hlog("expand (cursor \(Int(loc.x)),\(Int(loc.y)))") }
