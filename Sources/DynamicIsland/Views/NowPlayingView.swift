@@ -52,28 +52,19 @@ struct NowPlayingView: View {
         }
     }
 
-    /// Music and browser-with-JS: artwork on the left, controls below.
+    /// Music and browser-with-JS: artwork centered on top, text + controls below.
     private var standardPlayer: some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 14) {
-                ArtworkView(image: media.artwork, accent: media.accent,
-                            cornerRadius: media.info.isBrowser ? 7 : 8)
-                    .frame(width: media.info.isBrowser ? 84 : 58,
-                           height: media.info.isBrowser ? 48 : 58)
-                    .shadow(color: media.accent.opacity(0.5), radius: 8)
+        VStack(spacing: 5) {
+            ArtworkView(image: media.artwork, accent: media.accent,
+                        cornerRadius: media.info.isBrowser ? 8 : 9)
+                .frame(width: media.info.isBrowser ? 82 : 46, height: 46)
+                .shadow(color: media.accent.opacity(0.5), radius: 8, y: 2)
 
-                VStack(alignment: .leading, spacing: 3) {
-                    Marquee(text: media.info.title, font: .system(size: 14, weight: .semibold))
-                        .frame(height: 18)
-                    Text(media.info.artist.isEmpty ? media.info.album : media.info.artist)
-                        .font(.system(size: 12))
-                        .foregroundStyle(.white.opacity(0.65))
-                        .lineLimit(1)
-                    Spacer(minLength: 0)
-                    sourceBadge
-                }
-                Spacer(minLength: 0)
-            }
+            Marquee(text: media.info.title, font: .system(size: 14, weight: .semibold))
+                .frame(height: 18)
+                .frame(maxWidth: 340)
+
+            subtitleLine
 
             scrubber
 
@@ -101,13 +92,34 @@ struct NowPlayingView: View {
                     }
                 } label: {
                     Label("Playlist wechseln", systemImage: "music.note.list")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(media.accent)
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
             }
         }
+        .frame(maxWidth: .infinity)
+    }
+
+    /// One centered line: source badge · artist (skips a redundant duplicate).
+    private var subtitleLine: some View {
+        let badgeLabel = media.info.isBrowser
+            ? (media.info.album.isEmpty ? media.info.app : media.info.album)
+            : media.info.app
+        let artist = media.info.artist
+        let showArtist = !artist.isEmpty && artist != badgeLabel
+        return HStack(spacing: 5) {
+            sourceBadge
+            if showArtist {
+                Text("·").font(.system(size: 11)).foregroundStyle(.white.opacity(0.3))
+                Text(artist)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.white.opacity(0.65))
+                    .lineLimit(1)
+            }
+        }
+        .frame(maxWidth: 360)
     }
 
     /// Browser video without JS control: a big centered thumbnail in the free space.

@@ -81,17 +81,25 @@ struct Marquee: View {
 
     private var widthReader: some View {
         GeometryReader { g in
-            Color.clear.onAppear { textWidth = g.size.width }
-                .onChange(of: text) { textWidth = g.size.width }
+            Color.clear
+                .onAppear { textWidth = g.size.width; restart() }
+                .onChange(of: text) { textWidth = g.size.width; restart() }
         }
     }
 
     private func restart() {
-        offset = 0
-        guard textWidth > containerWidth + 4 else { return }
-        let distance = textWidth - containerWidth + 8
-        withAnimation(.linear(duration: Double(distance) / 30.0).delay(1.2).repeatForever(autoreverses: true)) {
-            offset = -distance
+        guard textWidth > 0, containerWidth > 0 else { offset = 0; return }
+        if overflowing {
+            offset = 0
+            let distance = textWidth - containerWidth + 8
+            withAnimation(.linear(duration: Double(distance) / 30.0).delay(1.2).repeatForever(autoreverses: true)) {
+                offset = -distance
+            }
+        } else {
+            // Short enough to fit → center it (and stop any running scroll).
+            withAnimation(.easeOut(duration: 0.12)) {
+                offset = (containerWidth - textWidth) / 2
+            }
         }
     }
 }
