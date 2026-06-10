@@ -1,0 +1,43 @@
+# macOS
+.DS_Store
+**/.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+build.log
+
+# Node
+node_modules/
+**/node_modules/
+
+# Python
+.venv/
+venv/
+**/__pycache__/
+*.pyc
+
+# Build output
+dist/
+build/
+DerivedData/
+.build/
+
+# Editors
+.vscode/
+.idea/
+
+# Secrets / environment
+.env
+.env.local
+**/.env
+
+# Swift / Xcode
+*.swiftpm
+.swiftpm/
+*.xcuserstate
+*.app
+Package.resolved
+
+# Sensitive screenshots (reveal personal location)
+Screenshots/12_weather.png
