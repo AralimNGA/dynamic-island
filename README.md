@@ -70,7 +70,23 @@ On first use, macOS will prompt for Automation (Spotify/Music/Calendar), Camera 
 
 ## Screenshots
 
-![Now-playing media wrapped around the MacBook notch](screenshots/demo.png)
+<p align="center">
+  <img src="Screenshots/4_expanded_music.png" width="460"><br>
+  <sub><b>Expanded now-playing</b> — wrapped around the MacBook notch</sub>
+</p>
+
+<table align="center">
+  <tr>
+    <td align="center"><img src="Screenshots/1_collapsed.png" width="230"><br><sub>Collapsed pill</sub></td>
+    <td align="center"><img src="Screenshots/5_expanded_timer.png" width="230"><br><sub>Timer</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="Screenshots/9_expanded_recorder.png" width="230"><br><sub>Voice recorder</sub></td>
+    <td align="center"><img src="Screenshots/3_charging_peek.png" width="230"><br><sub>Charging peek</sub></td>
+  </tr>
+</table>
+
+<sub>More views (calendar, shelf/AirDrop, stocks, devices, Claude assistant, settings…) in the <a href="Screenshots/"><code>Screenshots/</code></a> folder.</sub>
 
 ## Project Status
 
