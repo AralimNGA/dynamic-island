@@ -16,9 +16,17 @@ cd "$HERE"
 swift build -c release
 BIN="$HERE/.build/release/$APP_NAME"
 
+# Adapter VOR dem Löschen der installierten App bauen – schlägt etwas fehl,
+# bleibt die bisherige App intakt.
+echo "▶︎ Baue MediaRemote-Adapter (systemweites Now Playing)…"
+STAGE="$(mktemp -d -t island_mr)"
+trap 'rm -rf "$STAGE"' EXIT
+"$HERE/Vendor/build_mediaremote.sh" "$STAGE"
+
 echo "▶︎ Schnüre App-Bundle: $APP"
 # Laufende Instanz beenden, damit die Binary ersetzt werden kann.
 pkill -x "$APP_NAME" 2>/dev/null || true
+pkill -f "DynamicIsland.app/Contents/Resources/mediaremote-adapter.pl" 2>/dev/null || true
 sleep 0.3
 mkdir -p "$INSTALL_DIR"
 rm -rf "$APP"
@@ -35,8 +43,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleName</key><string>$DISPLAY_NAME</string>
   <key>CFBundleDisplayName</key><string>$DISPLAY_NAME</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>2.0</string>
+  <key>CFBundleVersion</key><string>2</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>LSUIElement</key><true/>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
@@ -47,9 +55,15 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSCalendarsFullAccessUsageDescription</key><string>Dynamic Island zeigt deinen nächsten Termin an.</string>
   <key>NSCameraUsageDescription</key><string>Die Spiegel-Funktion zeigt ein Live-Kamerabild in der Island.</string>
   <key>NSMicrophoneUsageDescription</key><string>Die Aufnahme-Funktion nimmt Audio über das Mikrofon auf.</string>
+  <key>NSBluetoothAlwaysUsageDescription</key><string>Dynamic Island liest den Akkustand deiner AirPods in der Nähe – auch wenn sie mit dem iPhone verbunden sind.</string>
+  <key>NSLocalNetworkUsageDescription</key><string>Dynamic Island liest den Akkustand deines iPhones und iPads über das WLAN.</string>
 </dict></plist>
 PLIST
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
+
+mkdir -p "$APP/Contents/Frameworks"
+ditto "$STAGE/MediaRemoteAdapter.framework" "$APP/Contents/Frameworks/MediaRemoteAdapter.framework"
+cp "$STAGE/mediaremote-adapter.pl" "$APP/Contents/Resources/"
 
 ENT="$(mktemp -t island_ent).plist"
 cat > "$ENT" <<ENTPLIST

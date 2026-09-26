@@ -12,6 +12,8 @@ final class BatteryMonitor: ObservableObject {
 
     /// Called when the AC adapter is connected/disconnected.
     var onPlugChange: ((_ pluggedIn: Bool) -> Void)?
+    /// Called when the charge level changes (old, new) – für Akku-Warnungen.
+    var onPercentChange: ((_ old: Int, _ new: Int) -> Void)?
 
     private var runLoopSource: CFRunLoopSource?
     private var wasPlugged = false
@@ -40,6 +42,7 @@ final class BatteryMonitor: ObservableObject {
               let list = IOPSCopyPowerSourcesList(blob)?.takeRetainedValue() as? [CFTypeRef]
         else { present = false; return }
 
+        let oldPercent = percent
         for source in list {
             guard let desc = IOPSGetPowerSourceDescription(blob, source)?.takeUnretainedValue() as? [String: Any]
             else { continue }
@@ -57,7 +60,9 @@ final class BatteryMonitor: ObservableObject {
             break
         }
 
-        if isPluggedIn != wasPlugged {
+        if started, percent != oldPercent { onPercentChange?(oldPercent, percent) }
+        // Erst nach dem Start melden – sonst erscheint bei jedem App-Start „Laden“.
+        if started, isPluggedIn != wasPlugged {
             wasPlugged = isPluggedIn
             onPlugChange?(isPluggedIn)
         }

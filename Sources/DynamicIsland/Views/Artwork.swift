@@ -36,6 +36,8 @@ struct Marquee: View {
     let text: String
     var font: Font = .system(size: 13, weight: .semibold)
     var color: Color = .white
+    /// Kurzer Text: zentriert (Standard) oder linksbündig.
+    var leading = false
 
     @State private var offset: CGFloat = 0
     @State private var textWidth: CGFloat = 0
@@ -98,7 +100,7 @@ struct Marquee: View {
         } else {
             // Short enough to fit → center it (and stop any running scroll).
             withAnimation(.easeOut(duration: 0.12)) {
-                offset = (containerWidth - textWidth) / 2
+                offset = leading ? 0 : (containerWidth - textWidth) / 2
             }
         }
     }

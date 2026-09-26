@@ -1,0 +1,1 @@
+Quelle: https://github.com/ungive/mediaremote-adapter @ 73f14ab (BSD-3-Clause). Von Aralim am 26.09.2026 freigegeben. build.sh baut das Framework aus diesem Quellcode.

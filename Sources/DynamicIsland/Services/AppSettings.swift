@@ -27,9 +27,9 @@ final class AppSettings: ObservableObject {
     }
 
     static let anthropicModels: [(id: String, label: String)] = [
-        ("claude-opus-4-8", "Opus 4.8 (beste Qualität)"),
-        ("claude-sonnet-4-6", "Sonnet 4.6 (ausgewogen)"),
-        ("claude-haiku-4-5", "Haiku 4.5 (schnell & günstig)"),
+        ("claude-opus-5-5", "Opus 5.5 (beste Qualität)"),
+        ("claude-sonnet-5", "Sonnet 5 (ausgewogen)"),
+        ("claude-haiku-4-5-20251001", "Haiku 4.5 (schnell & günstig)"),
     ]
 
     private let d = UserDefaults.standard
@@ -46,11 +46,35 @@ final class AppSettings: ObservableObject {
     /// Lets the assistant control the Mac (open apps/URLs, volume, etc.) via tools.
     @Published var assistantMacControl: Bool { didSet { d.set(assistantMacControl, forKey: "assistantMacControl") } }
 
+    // Verhalten
+    @Published var openOnHover: Bool { didSet { d.set(openOnHover, forKey: "openOnHover") } }
+    @Published var hoverDelay: Double { didSet { d.set(hoverDelay, forKey: "hoverDelay") } }
+    @Published var haptics: Bool { didSet { d.set(haptics, forKey: "haptics") } }
+    @Published var hideInScreenshots: Bool { didSet { d.set(hideInScreenshots, forKey: "hideInScreenshots") } }
+
+    /// Now Playing systemweit über MediaRemote (jede App), sonst nur Spotify/Music/Browser.
+    @Published var systemNowPlaying: Bool { didSet { d.set(systemNowPlaying, forKey: "systemNowPlaying") } }
+
+    // Akku anderer Geräte
+    @Published var remoteBatteryHotspot: Bool { didSet { d.set(remoteBatteryHotspot, forKey: "remoteBatteryHotspot") } }
+    @Published var remoteBatteryBLE: Bool { didSet { d.set(remoteBatteryBLE, forKey: "remoteBatteryBLE") } }
+    @Published var remoteBatteryLockdown: Bool { didSet { d.set(remoteBatteryLockdown, forKey: "remoteBatteryLockdown") } }
+
+    // Live-Aktivitäten
+    @Published var trackBanner: Bool { didSet { d.set(trackBanner, forKey: "trackBanner") } }
+    @Published var volumeHUD: Bool { didSet { d.set(volumeHUD, forKey: "volumeHUD") } }
+    @Published var replaceSystemHUD: Bool { didSet { d.set(replaceSystemHUD, forKey: "replaceSystemHUD") } }
+    @Published var deviceBanner: Bool { didSet { d.set(deviceBanner, forKey: "deviceBanner") } }
+    @Published var showPrivacyIndicator: Bool { didSet { d.set(showPrivacyIndicator, forKey: "showPrivacyIndicator") } }
+    @Published var unlockAnimation: Bool { didSet { d.set(unlockAnimation, forKey: "unlockAnimation") } }
+    @Published var batteryAlerts: Bool { didSet { d.set(batteryAlerts, forKey: "batteryAlerts") } }
+
     private init() {
         aiProvider = AIProvider(rawValue: d.string(forKey: "aiProvider") ?? "") ?? .anthropic
         lmStudioURL = d.string(forKey: "lmStudioURL") ?? "http://localhost:1234/v1/chat/completions"
         lmStudioModel = d.string(forKey: "lmStudioModel") ?? "local-model"
-        anthropicModel = d.string(forKey: "anthropicModel") ?? "claude-opus-4-8"
+        let storedModel = d.string(forKey: "anthropicModel") ?? ""
+        anthropicModel = Self.anthropicModels.contains { $0.id == storedModel } ? storedModel : "claude-opus-5-5"
         accentName = d.string(forKey: "accentName") ?? "pink"
         notchFlare = d.object(forKey: "notchFlare") != nil ? d.double(forKey: "notchFlare") : 11
         if let arr = d.array(forKey: "enabledTabs") as? [String], !arr.isEmpty {
@@ -67,6 +91,31 @@ final class AppSettings: ObservableObject {
         stockSymbols = (d.array(forKey: "stockSymbols") as? [String]) ?? ["AAPL", "MSFT", "NVDA"]
         assistantMacControl = d.object(forKey: "assistantMacControl") != nil
             ? d.bool(forKey: "assistantMacControl") : true
+
+        let ud = UserDefaults.standard
+        let flag = { (key: String, def: Bool) -> Bool in ud.object(forKey: key) != nil ? ud.bool(forKey: key) : def }
+        openOnHover = flag("openOnHover", true)
+        hoverDelay = ud.object(forKey: "hoverDelay") != nil ? ud.double(forKey: "hoverDelay") : 0.12
+        haptics = flag("haptics", true)
+        hideInScreenshots = flag("hideInScreenshots", true)
+        systemNowPlaying = flag("systemNowPlaying", true)
+        remoteBatteryHotspot = flag("remoteBatteryHotspot", true)
+        remoteBatteryBLE = flag("remoteBatteryBLE", false)      // erst nach „Bluetooth erlauben“
+        remoteBatteryLockdown = flag("remoteBatteryLockdown", true)
+        trackBanner = flag("trackBanner", true)
+        volumeHUD = flag("volumeHUD", true)
+        replaceSystemHUD = flag("replaceSystemHUD", true)
+        deviceBanner = flag("deviceBanner", true)
+        showPrivacyIndicator = flag("showPrivacyIndicator", true)
+        unlockAnimation = flag("unlockAnimation", true)
+        batteryAlerts = flag("batteryAlerts", true)
+
+        // Version 2: neuer Übersicht-Tab einmalig einschalten.
+        if !d.bool(forKey: "migratedHomeTab") {
+            enabledTabs.insert(ExpandedTab.home.rawValue)
+            d.set(Array(enabledTabs), forKey: "enabledTabs")
+            d.set(true, forKey: "migratedHomeTab")
+        }
     }
 
     private func savePlaylists() {

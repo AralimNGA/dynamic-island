@@ -3,21 +3,16 @@ import EventKit
 
 /// The fully-expanded panel with a tab bar at the bottom.
 struct ExpandedView: View {
+    let services: IslandServices
     @ObservedObject var state: IslandState
-    @ObservedObject var media: MediaController
-    @ObservedObject var battery: BatteryMonitor
-    @ObservedObject var timer: TimerModel
-    @ObservedObject var shelf: ShelfModel
-    @ObservedObject var calendar: CalendarService
-    @ObservedObject var claude: ClaudeService
-    @ObservedObject var camera: CameraController
-    @ObservedObject var recorder: AudioRecorder
-    @ObservedObject var todo: TodoModel
-    @ObservedObject var weather: WeatherService
-    @ObservedObject var stocks: StockService
-    @ObservedObject var deviceBattery: DeviceBatteryService
     @ObservedObject private var settings = AppSettings.shared
     let topInset: CGFloat
+
+    init(services: IslandServices, topInset: CGFloat) {
+        self.services = services
+        self.state = services.state
+        self.topInset = topInset
+    }
 
     private func fixTab() {
         if !settings.isEnabled(state.selectedTab), let first = settings.orderedEnabledTabs.first {
@@ -31,6 +26,7 @@ struct ExpandedView: View {
                 Text(state.selectedTab.title)
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.5))
+                    .contentTransition(.opacity)
                 Spacer()
                 Button {
                     NotificationCenter.default.post(name: .openIslandSettings, object: nil)
@@ -42,17 +38,17 @@ struct ExpandedView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Einstellungen")
-                StatusPill(battery: battery)
+                StatusPill(battery: services.battery)
             }
             .frame(height: 16)
 
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .transition(.opacity)
                 .id(state.selectedTab)
+                .transition(.blurReplace)
 
             TabBar(selected: $state.selectedTab) { tab in
-                if tab == .calendar { calendar.refresh() }
+                if tab == .calendar || tab == .home { services.calendar.refresh() }
             }
         }
         .padding(.horizontal, 14)
@@ -63,18 +59,20 @@ struct ExpandedView: View {
     }
 
     @ViewBuilder private var content: some View {
+        let s = services
         switch state.selectedTab {
-        case .nowPlaying: NowPlayingView(media: media)
-        case .claude:     ClaudeView(claude: claude)
-        case .mirror:     MirrorView(camera: camera)
-        case .recorder:   RecorderView(rec: recorder)
-        case .shelf:      ShelfView(shelf: shelf, state: state)
-        case .timer:      TimerView(timer: timer)
-        case .todo:       TodoView(todo: todo)
-        case .weather:    WeatherView(weather: weather)
-        case .stocks:     StockView(stocks: stocks)
-        case .devices:    DeviceBatteryView(devices: deviceBattery, battery: battery)
-        case .calendar:   CalendarPane(calendar: calendar)
+        case .home:       HomeView(services: s)
+        case .nowPlaying: NowPlayingView(media: s.media)
+        case .claude:     ClaudeView(claude: s.claude)
+        case .mirror:     MirrorView(camera: s.camera)
+        case .recorder:   RecorderView(rec: s.recorder)
+        case .shelf:      ShelfView(shelf: s.shelf, state: state)
+        case .timer:      TimerView(timer: s.timer)
+        case .todo:       TodoView(todo: s.todo)
+        case .weather:    WeatherView(weather: s.weather)
+        case .stocks:     StockView(stocks: s.stocks)
+        case .devices:    DeviceBatteryView(devices: s.deviceBattery, battery: s.battery, remote: s.remoteBattery)
+        case .calendar:   CalendarPane(calendar: s.calendar)
         }
     }
 }
@@ -85,25 +83,32 @@ struct TabBar: View {
     @Binding var selected: ExpandedTab
     var onSelect: (ExpandedTab) -> Void
     @ObservedObject private var settings = AppSettings.shared
+    @Namespace private var highlight
 
     var body: some View {
-        HStack(spacing: 4) {
-            ForEach(settings.orderedEnabledTabs) { tab in
+        let tabs = settings.orderedEnabledTabs
+        let compact = tabs.count > 9
+        HStack(spacing: compact ? 1 : 4) {
+            ForEach(tabs) { tab in
                 Button {
                     withAnimation(.islandSnappy) { selected = tab }
                     onSelect(tab)
                 } label: {
                     Image(systemName: tab.icon)
-                        .font(.system(size: 13, weight: .semibold))
-                        .frame(width: 30, height: 26)
-                        .background(
-                            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .fill(selected == tab ? .white.opacity(0.16) : .clear)
-                        )
-                        .foregroundStyle(selected == tab ? .white : .white.opacity(0.45))
+                        .font(.system(size: compact ? 12 : 13, weight: .semibold))
+                        .frame(width: compact ? 29 : 32, height: 26)
+                        .background {
+                            if selected == tab {
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(.white.opacity(0.16))
+                                    .matchedGeometryEffect(id: "tab", in: highlight)
+                            }
+                        }
+                        .foregroundStyle(selected == tab ? .white : .white.opacity(0.42))
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .help(tab.title)
             }
         }
         .padding(3)

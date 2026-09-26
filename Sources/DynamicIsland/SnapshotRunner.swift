@@ -1,175 +1,187 @@
 import AppKit
+import SwiftUI
+
+/// Test-/Entwickler-Hooks über Umgebungsvariablen (nur für die Verifikation):
+/// - ISLAND_SNAPSHOT=<ordner>   alle Zustände als PNG rendern, dann beenden
+/// - ISLAND_FORCE_EXPAND=1      nach dem Start offen (ISLAND_TAB=<rawValue> wählt den Tab,
+///                              ISLAND_HOLD_OPEN=1 verhindert das Zuklappen)
+/// - ISLAND_OPEN_SETTINGS=1     Einstellungsfenster öffnen
+/// - ISLAND_AI_TEST=<frage>     Frage an den Assistenten, Verlauf auf stderr (ISLAND_AI_CONFIRM=allow|deny)
+enum DebugHooks {
+    static func run(env: [String: String], services s: IslandServices, controller: IslandController) {
+        if let dir = env["ISLAND_SNAPSHOT"] {
+            SnapshotRunner(dir: dir, services: s, view: controller.contentView).run()
+        }
+        if env["ISLAND_SELFTEST"] == "1" {
+            log("‹selftest› AirPods-Decoder: \(ProximityPairingScanner.selfTest() ? "OK" : "FEHLER")")
+            NSApp.terminate(nil)
+        }
+        if env["ISLAND_FORCE_EXPAND"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                s.state.open(env["ISLAND_TAB"].flatMap(ExpandedTab.init(rawValue:)))
+            }
+        }
+        if env["ISLAND_HOLD_OPEN"] == "1" { s.state.holdOpen = { true } }
+        if env["ISLAND_OPEN_SETTINGS"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                (NSApp.delegate as? AppDelegate)?.openSettings()
+            }
+        }
+        if let q = env["ISLAND_AI_TEST"] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { s.claude.ask(q) }
+            if let mode = env["ISLAND_AI_CONFIRM"] {
+                let t = Timer(timeInterval: 0.4, repeats: true) { _ in
+                    guard s.claude.pendingAction != nil else { return }
+                    log("‹ai› confirm-card -> \(mode)")
+                    if mode == "allow" { s.claude.allowPending() } else { s.claude.denyPending() }
+                }
+                RunLoop.main.add(t, forMode: .common)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 14.0) {
+                for t in s.claude.turns {
+                    log("‹ai› [\(t.role)] \(t.text)")
+                    for b in t.blocks {
+                        if case let .toolUse(_, name, input) = b { log("‹ai›   →tool_use \(name) \(input)") }
+                        if case let .toolResult(_, content, isErr) = b {
+                            log("‹ai›   ←result(err=\(isErr)) \(content.prefix(90))")
+                        }
+                    }
+                }
+                NSApp.terminate(nil)
+            }
+        }
+    }
+
+    static func log(_ s: String) {
+        FileHandle.standardError.write((s + "\n").data(using: .utf8)!)
+    }
+}
 
 /// Test-only: drives the island through several states and renders each to a PNG
 /// in-process (no Screen Recording permission needed), then quits.
 final class SnapshotRunner {
     private let dir: String
-    private let state: IslandState
-    private let media: MediaController
-    private let timer: TimerModel
-    private let shelf: ShelfModel
-    private let todo: TodoModel
-    private let claude: ClaudeService
+    private let s: IslandServices
     private let view: NSView
 
-    init(dir: String, state: IslandState, media: MediaController, timer: TimerModel,
-         shelf: ShelfModel, todo: TodoModel, claude: ClaudeService, view: NSView) {
+    init(dir: String, services: IslandServices, view: NSView) {
         self.dir = dir
-        self.state = state
-        self.media = media
-        self.timer = timer
-        self.shelf = shelf
-        self.todo = todo
-        self.claude = claude
+        self.s = services
         self.view = view
     }
 
     func run() {
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        let state = s.state, media = s.media
 
         let fakeTrack = NowPlaying(app: "Spotify", title: "Blinding Lights",
                                    artist: "The Weeknd", album: "After Hours",
                                    isPlaying: true, duration: 200, position: 82, artworkURL: "",
                                    shuffling: true, repeating: false)
 
-        var fakeVideoJS = NowPlaying(app: "Safari", title: "H Y P E (Official Video)",
-                                     artist: "The Midnight", album: "YouTube",
-                                     isPlaying: true, duration: 243, position: 95, artworkURL: "")
-        fakeVideoJS.isBrowser = true; fakeVideoJS.canSeek = true
-
-        var fakeVideoNoJS = NowPlaying(app: "Safari", title: "H Y P E (Official Video)",
-                                       artist: "YouTube", album: "YouTube",
-                                       isPlaying: true, artworkURL: "")
-        fakeVideoNoJS.isBrowser = true; fakeVideoNoJS.canSeek = false
-
-        // A stand-in 16:9 thumbnail so the artwork reads like a video frame.
-        let thumb = NSImage(size: NSSize(width: 192, height: 108))
-        thumb.lockFocus()
-        NSGradient(colors: [
-            NSColor(calibratedRed: 0.20, green: 0.10, blue: 0.35, alpha: 1),
-            NSColor(calibratedRed: 0.55, green: 0.18, blue: 0.40, alpha: 1),
-        ])!.draw(in: NSRect(x: 0, y: 0, width: 192, height: 108), angle: -45)
-        NSColor(white: 1, alpha: 0.92).setFill()
-        let p = NSBezierPath()
-        p.move(to: NSPoint(x: 84, y: 38)); p.line(to: NSPoint(x: 84, y: 70))
-        p.line(to: NSPoint(x: 114, y: 54)); p.close(); p.fill()
-        thumb.unlockFocus()
+        func reset() {
+            state.pinnedOpen = false
+            state.hovering = false
+            state.hoverIntent = false
+            state.banner = nil
+            state.transientActivity = .idle
+            state.privacy = .init()
+            media.showMediaPeek = false
+        }
 
         let steps: [(String, () -> Void)] = [
-            ("1_collapsed", {
-                self.state.pinnedOpen = false
-                self.media.info = NowPlaying()
-                self.state.transientActivity = .idle
+            ("01_hidden", { reset(); media.info = NowPlaying() }),
+            ("02_lip", { reset(); state.hoverIntent = true }),
+            ("03_media_peek", {
+                reset()
+                media.info = fakeTrack; media.accent = .pink; media.showMediaPeek = true
             }),
-            ("2_media_peek", {
-                self.state.pinnedOpen = false
-                self.media.info = fakeTrack
-                self.media.accent = .pink
-                self.media.showMediaPeek = true
+            ("04_volume_hud", { reset(); state.transientActivity = .volume(level: 0.62, muted: false, symbol: "") }),
+            ("05_brightness_hud", { reset(); state.transientActivity = .brightness(level: 0.35) }),
+            ("06_charging", { reset(); state.transientActivity = .charging(percent: 82, full: false) }),
+            ("07_low_battery", { reset(); state.transientActivity = .lowBattery(percent: 9) }),
+            ("08_privacy", { reset(); state.privacy = .init(camera: true, mic: true) }),
+            ("09_unlocked", { reset(); state.transientActivity = .unlocked }),
+            ("10_banner_track", { reset(); media.info = fakeTrack; state.banner = .track }),
+            ("11_banner_airpods", {
+                reset()
+                state.banner = .device(name: "AirPods Pro von Aralim", symbol: "airpodspro",
+                                       readings: [.init(label: "L", percent: 82), .init(label: "R", percent: 78),
+                                                  .init(label: "Case", percent: 95)])
             }),
-            ("3_charging_peek", {
-                self.media.info = NowPlaying()
-                self.state.transientActivity = .charging(percent: 82, full: false)
+            ("12_banner_timer", {
+                reset()
+                state.banner = .message(symbol: "timer", title: "Timer abgelaufen", subtitle: "Zeit ist um", tint: .orange)
             }),
-            ("4_expanded_music", {
-                self.state.transientActivity = .idle
-                self.media.info = fakeTrack
-                self.media.accent = .pink
-                self.state.selectedTab = .nowPlaying
-                self.state.pinnedOpen = true
+            ("13_home", {
+                reset()
+                media.info = fakeTrack; media.accent = .pink
+                self.s.timer.startCountdown(seconds: 305)
+                state.selectedTab = .home
+                state.pinnedOpen = true
             }),
-            ("5_expanded_timer", {
-                self.timer.startCountdown(seconds: 125)
-                self.state.selectedTab = .timer
+            ("14_home_empty", {
+                self.s.timer.stop()
+                media.info = NowPlaying()
+                state.selectedTab = .home
             }),
-            ("6_expanded_shelf", {
-                self.timer.stop()
-                self.state.selectedTab = .shelf
-            }),
-            ("7_expanded_calendar", {
-                self.state.selectedTab = .calendar
-            }),
-            ("8_expanded_claude", {
-                self.state.selectedTab = .claude
-            }),
-            ("9_expanded_recorder", {
-                self.state.selectedTab = .recorder
-            }),
-            ("10_expanded_shelf_airdrop", {
-                let readme = URL(fileURLWithPath: NSHomeDirectory() + "/Desktop/DynamicIsland/README.md")
-                if FileManager.default.fileExists(atPath: readme.path) {
-                    self.shelf.add(urls: [readme])
-                }
-                self.state.selectedTab = .shelf
-            }),
-            ("11_expanded_todo", {
-                if self.todo.items.isEmpty {
-                    self.todo.add("Milch kaufen")
-                    self.todo.add("Präsentation fertig machen")
-                    self.todo.add("Zahnarzttermin")
-                    self.todo.items[2].done = true
-                }
-                self.state.selectedTab = .todo
-            }),
-            ("13_video_js", {
-                self.media.info = fakeVideoJS
-                self.media.artwork = thumb
-                self.media.accent = .purple
-                self.state.selectedTab = .nowPlaying
-            }),
-            ("14_video_nojs", {
-                self.media.info = fakeVideoNoJS
-                self.media.artwork = thumb
-                self.media.accent = .purple
-                self.state.selectedTab = .nowPlaying
-            }),
-            ("15_video_peek", {
-                self.state.pinnedOpen = false
-                self.media.info = fakeVideoNoJS
-                self.media.artwork = thumb
-                self.media.accent = .purple
-                self.media.showMediaPeek = true
-            }),
-            ("16_ai_pending", {
-                self.state.pinnedOpen = true
-                self.media.showMediaPeek = false
-                self.claude.turns = [
-                    .init(role: "user", text: "Leere bitte den Papierkorb"),
-                    .init(role: "assistant", text: "Klar, ich leere den Papierkorb für dich."),
-                ]
-                self.claude.pendingAction = .init(toolName: "empty_trash",
-                                                  title: "Papierkorb leeren?",
-                                                  detail: "Das lässt sich nicht rückgängig machen.")
-                self.state.selectedTab = .claude
+            ("15_music", { media.info = fakeTrack; media.accent = .pink; state.selectedTab = .nowPlaying }),
+            ("16_timer", { self.s.timer.startCountdown(seconds: 125); state.selectedTab = .timer }),
+            ("17_shelf", { self.s.timer.stop(); state.selectedTab = .shelf }),
+            ("18_claude", { state.selectedTab = .claude }),
+            ("19_devices", {
+                let store = self.s.remoteBattery.store
+                store.persistenceEnabled = false
+                let now = Date()
+                store.ingest([
+                    BatterySample(key: .init(kind: .iPhone, model: "iPhone17,1", name: "iPhone von Aralim"),
+                                  parts: [.init(slot: .main, percent: 75, charging: nil)],
+                                  precision: .bucket4, source: .hotspot, observedAt: now),
+                    BatterySample(key: .init(kind: .iPhone, model: "iPhone19,7", name: "iPhone von Aralim"),
+                                  parts: [.init(slot: .main, percent: 50, charging: nil)],
+                                  precision: .bucket4, source: .hotspot, observedAt: now.addingTimeInterval(-240)),
+                    BatterySample(key: .init(kind: .iPad, model: "iPad17,4", name: "iPad von Aralim (2)"),
+                                  parts: [.init(slot: .main, percent: 100, charging: nil)],
+                                  precision: .bucket4, source: .hotspot, observedAt: now),
+                    BatterySample(key: .init(kind: .airPods, model: "0x2027", name: "AirPods Pro von Aralim"),
+                                  parts: [.init(slot: .left, percent: 80, charging: false),
+                                          .init(slot: .right, percent: 70, charging: false),
+                                          .init(slot: .chargingCase, percent: 40, charging: true)],
+                                  precision: .step10, source: .proximity, observedAt: now),
+                ])
+                state.selectedTab = .devices
             }),
         ]
 
-        var delay = 0.5
+        var delay = 0.6
         for (name, setup) in steps {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                setup()
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay + 0.9) {
-                self.capture(named: name)
-            }
-            delay += 1.2
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { setup() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay + 1.0) { MainActor.assumeIsolated { self.capture(named: name) } }
+            delay += 1.3
         }
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay + 0.3) {
-            NSApp.terminate(nil)
-        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay + 0.3) { NSApp.terminate(nil) }
     }
 
-    private func capture(named name: String) {
-        view.layoutSubtreeIfNeeded()
-        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
-        view.cacheDisplay(in: view.bounds, to: rep)
+    @MainActor private func capture(named name: String) {
+        // SwiftUI direkt rendern (mit Transparenz) – cacheDisplay liefert bei
+        // Layer-Views schwarz statt durchsichtig.
+        let size = view.bounds.size
+        let renderer = ImageRenderer(content: IslandRootView(services: s, forSnapshot: true).frame(width: size.width, height: size.height))
+        renderer.scale = 2
+        guard let island = renderer.nsImage else { return }
 
-        let image = NSImage(size: view.bounds.size)
+        // Hintergrund wie eine helle Menüleiste mit schwarzer Notch – so sieht man,
+        // was wirklich über die Notch hinaus gezeichnet wird.
+        let image = NSImage(size: size)
         image.lockFocus()
-        NSColor(calibratedWhite: 0.13, alpha: 1).setFill()
-        NSRect(origin: .zero, size: view.bounds.size).fill()
-        rep.draw(in: NSRect(origin: .zero, size: view.bounds.size))
+        NSColor(calibratedWhite: 0.82, alpha: 1).setFill()
+        NSRect(origin: .zero, size: size).fill()
+        let m = s.state.metrics
+        NSColor.black.setFill()
+        NSBezierPath(roundedRect: NSRect(x: (size.width - m.notchWidth) / 2, y: size.height - m.notchHeight,
+                                         width: m.notchWidth, height: m.notchHeight + 10),
+                     xRadius: 9, yRadius: 9).fill()
+        island.draw(in: NSRect(origin: .zero, size: size))
         image.unlockFocus()
 
         guard let tiff = image.tiffRepresentation,
@@ -177,6 +189,6 @@ final class SnapshotRunner {
               let png = bitmap.representation(using: .png, properties: [:]) else { return }
         let path = (dir as NSString).appendingPathComponent("\(name).png")
         try? png.write(to: URL(fileURLWithPath: path))
-        FileHandle.standardError.write("snapshot: \(path)\n".data(using: .utf8)!)
+        DebugHooks.log("snapshot: \(path)")
     }
 }

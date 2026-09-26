@@ -21,9 +21,10 @@ struct NowPlaying: Equatable {
     var trackKey: String { app + "|" + title + "|" + artist }
 }
 
-/// Reads system media state from Spotify / Apple Music via AppleScript and sends
-/// transport commands. The private MediaRemote framework is blocked for third
-/// parties on macOS 15.4+, so per-app scripting is the robust path.
+/// Now Playing der Island. Hauptquelle ist MediaRemote (systemweit, jede App,
+/// über `MediaRemoteSource`). Ist das nicht verfügbar, liest die Klasse Spotify,
+/// Apple Music und Browser-Videos per AppleScript. Spotify-Extras (Shuffle,
+/// Wiederholen, Playlists) laufen immer über AppleScript.
 final class MediaController: ObservableObject {
     enum RepeatMode: String { case off, all, one }
 
@@ -46,6 +47,40 @@ final class MediaController: ObservableObject {
     var isPlaying: Bool { info.isPlaying && info.hasTrack }
     var hasTrack: Bool { info.hasTrack }
 
+    /// true = Daten kommen systemweit aus MediaRemote, sonst AppleScript-Polling.
+    @Published private(set) var systemWide = false
+
+    private let remote = MediaRemoteSource()
+    private var remoteSnap: MediaRemoteSource.Snapshot?
+    private var remoteArtwork: NSImage?
+    private var remoteArtworkID = -1
+    /// Zuletzt angezeigte Daten kamen aus MediaRemote (für Cover-Verwaltung).
+    private var lastSourceRemote = false
+    /// Spotify-Extras aus AppleScript – an den Titel gebunden, für den sie gelesen wurden.
+    private var spotifyExtras: (shuffling: Bool, repeating: Bool, uri: String, title: String, artist: String)?
+    /// Kurzlebige optimistische Anzeige nach Play/Pause bzw. Spulen (bis MediaRemote bestätigt).
+    private var optimistic: (playing: Bool?, elapsed: Double?, at: Date, until: Date)?
+    private var appNames: [String: String] = [:]
+    /// Repeat-One nach manuellem Skip: erst auf die erste *neue* URI wieder sperren.
+    private var relockFrom: String?
+    private var relockDeadline = Date.distantPast
+    private var lastReplay = Date.distantPast
+    /// Jeder manuelle Skip zählt hoch – nur Abfragen, die *nach* dem letzten Skip
+    /// eingereiht wurden, dürfen Repeat-One neu sperren.
+    private var skipSeq = 0
+    /// Titel, für den das Apple-Music-Cover (AppleScript) zuletzt geladen wurde.
+    private var musicArtKey = ""
+
+    /// MediaRemote liefert gerade Daten → diese anzeigen und darüber steuern.
+    /// Sonst (nichts gemeldet oder Weg gesperrt) übernimmt AppleScript.
+    private var usingRemote: Bool { systemWide && remoteSnap != nil }
+
+    /// Alle Apps, die Web-Links öffnen (Firefox, Zen, Orion … nicht nur die feste Liste).
+    private lazy var webHandlerIDs: Set<String> = {
+        guard let u = URL(string: "https://example.com") else { return [] }
+        return Set(NSWorkspace.shared.urlsForApplications(toOpen: u).compactMap { Bundle(url: $0)?.bundleIdentifier })
+    }()
+
     private let queue = DispatchQueue(label: "island.media", qos: .userInitiated)
     private var timer: Timer?
     private var lastKey = ""
@@ -64,10 +99,156 @@ final class MediaController: ObservableObject {
     }
 
     func start() {
+        remote.onAvailabilityChange = { [weak self] ok in
+            guard let self else { return }
+            self.systemWide = ok && AppSettings.shared.systemNowPlaying
+            if !self.systemWide { self.leaveRemoteMode() }
+            self.poll()
+        }
+        remote.onUpdate = { [weak self] snap, art in self?.applyRemote(snap, artwork: art) }
+        if AppSettings.shared.systemNowPlaying { remote.start() }
+
         poll()
         let t = Timer(timeInterval: 1.2, repeats: true) { [weak self] _ in self?.poll() }
         RunLoop.main.add(t, forMode: .common)
         timer = t
+    }
+
+    /// Beim Beenden: Adapter-Prozess mitbeenden (sonst lebt perl weiter).
+    func shutdown() {
+        remote.stop(sync: true)
+    }
+
+    /// Schalter in den Einstellungen: MediaRemote an/aus.
+    func setSystemWide(_ on: Bool) {
+        if on {
+            remote.start()
+        } else {
+            remote.stop()
+            systemWide = false
+            leaveRemoteMode()
+            poll()
+        }
+    }
+
+    /// Zurück zu AppleScript: MediaRemote-Cover & Zustand verwerfen, damit der
+    /// AppleScript-Weg sein eigenes Cover neu lädt.
+    private func leaveRemoteMode() {
+        remoteSnap = nil
+        remoteArtwork = nil
+        optimistic = nil
+        if lastSourceRemote {
+            lastSourceRemote = false
+            lastKey = ""
+            lastArtworkURL = ""
+            musicArtKey = ""
+            artwork = nil
+            accent = Color(white: 0.4)
+        }
+    }
+
+    // MARK: - MediaRemote (systemweit)
+
+    private func applyRemote(_ snap: MediaRemoteSource.Snapshot?, artwork image: NSImage?) {
+        guard systemWide else { return }     // aus: nichts vom Adapter übernehmen
+        let artChanged = snap != nil && snap!.artworkID != remoteArtworkID
+        if let snap, artChanged {
+            remoteArtworkID = snap.artworkID
+            remoteArtwork = image          // nil = Cover weg bzw. neues Medium ohne Cover
+        }
+        // Echter Stand bestätigt die optimistische Anzeige.
+        if let o = optimistic, let p = o.playing, snap?.playing == p { optimistic = nil }
+        let previousKey = info.trackKey
+        remoteSnap = snap
+        guard let snap else {
+            // MediaRemote meldet nichts → AppleScript entscheidet (evtl. Spotify/Music).
+            if lastSourceRemote { lastSourceRemote = false; apply(NowPlaying()) }
+            poll()
+            return
+        }
+        let switched = !lastSourceRemote
+        if switched { lastArtworkURL = "" }
+        lastSourceRemote = true
+        musicArtKey = ""
+        let np = nowPlaying(from: snap)
+        apply(np)
+        if artChanged || switched {
+            artwork = remoteArtwork
+            accent = remoteArtwork.map(Self.dominantColor(of:)) ?? Color(white: 0.4)
+        }
+        // Spotify-Titelwechsel: URI & Co. sofort nachladen, nicht erst beim nächsten Tick.
+        if np.app == "Spotify", np.trackKey != previousKey { refreshSoon() }
+    }
+
+    private func nowPlaying(from s: MediaRemoteSource.Snapshot) -> NowPlaying {
+        var np = NowPlaying()
+        np.app = appName(for: s.bundleID)
+        np.title = s.title
+        np.artist = s.artist
+        np.album = s.album
+        np.isPlaying = s.playing
+        np.duration = s.duration
+        np.position = s.position()
+        np.isBrowser = Self.browsers.contains { $0.bundle == s.bundleID } || webHandlerIDs.contains(s.bundleID)
+        np.canSeek = s.duration > 0
+        if np.app == "Spotify", let x = spotifyExtras {
+            np.shuffling = x.shuffling
+            np.repeating = x.repeating
+            // Nur gültig, wenn sie zu genau diesem Titel gehört – sonst „unbekannt“.
+            np.trackURI = (x.title == s.title && x.artist == s.artist) ? x.uri : ""
+        } else {
+            np.shuffling = (s.shuffle ?? 1) > 1
+            np.repeating = (s.repeatMode ?? 1) > 1
+        }
+        if let o = optimistic {
+            if Date() < o.until {
+                if let p = o.playing { np.isPlaying = p }
+                if let e = o.elapsed {
+                    let playing = o.playing ?? s.playing
+                    var pos = playing ? e + Date().timeIntervalSince(o.at) * max(s.rate, 0) : e
+                    if s.duration > 0 { pos = min(s.duration, pos) }
+                    np.position = max(0, pos)
+                }
+            } else {
+                optimistic = nil
+            }
+        }
+        return np
+    }
+
+    /// Anzeigename einer App aus der Bundle-ID (bekannte Namen wie im AppleScript-Pfad).
+    private func appName(for bundleID: String) -> String {
+        switch bundleID {
+        case "com.spotify.client": return "Spotify"
+        case "com.apple.Music": return "Music"
+        case "": return "Wiedergabe"
+        default: break
+        }
+        if let b = Self.browsers.first(where: { $0.bundle == bundleID }) { return b.name }
+        if let cached = appNames[bundleID] { return cached }
+        var name = bundleID.split(separator: ".").last.map(String.init) ?? bundleID
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+            name = FileManager.default.displayName(atPath: url.path)
+            if name.hasSuffix(".app") { name = String(name.dropLast(4)) }
+        }
+        appNames[bundleID] = name
+        return name
+    }
+
+    /// Im MediaRemote-Modus: Position hochzählen und – nur bei Spotify – die
+    /// Extras (Shuffle/Repeat/Track-URI) per AppleScript nachladen.
+    private func tickRemote(apps: Set<String>) {
+        if let s = remoteSnap, s.playing || optimistic != nil { apply(nowPlaying(from: s)) }
+        guard info.app == "Spotify", apps.contains("Spotify") else { spotifyExtras = nil; return }
+        let seq = skipSeq
+        queue.async { [weak self] in
+            guard let self, let r = self.querySpotify() else { return }
+            DispatchQueue.main.async {
+                self.spotifyExtras = (r.shuffling, r.repeating, r.trackURI, r.title, r.artist)
+                if seq == self.skipSeq { self.maybeRelock(freshURI: r.trackURI) }
+                if self.usingRemote, let s = self.remoteSnap { self.apply(self.nowPlaying(from: s)) }
+            }
+        }
     }
 
     // MARK: - Polling
@@ -108,9 +289,11 @@ final class MediaController: ObservableObject {
         let browsers = runningBrowsers()
         let frontBundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
         Self.log("running media apps: \(apps.sorted()) browsers: \(browsers.map { $0.name })")
-        let running = !apps.isEmpty || !browsers.isEmpty
+        let running = !apps.isEmpty || !browsers.isEmpty || remoteSnap != nil
         if anyAppRunning != running { anyAppRunning = running }
+        if usingRemote { tickRemote(apps: apps); return }
         let currentApp = info.app
+        let seq = skipSeq
         queue.async { [weak self] in
             guard let self else { return }
             var candidates: [NowPlaying] = []
@@ -123,7 +306,13 @@ final class MediaController: ObservableObject {
             }
             let resolved = self.pick(candidates, current: currentApp)
             Self.log("resolved: app=\(resolved.app) title=\(resolved.title) playing=\(resolved.isPlaying) browser=\(resolved.isBrowser)")
-            DispatchQueue.main.async { self.apply(resolved) }
+            DispatchQueue.main.async {
+                // Inzwischen liefert MediaRemote → verspätetes AppleScript-Ergebnis verwerfen.
+                guard !self.usingRemote else { return }
+                self.lastSourceRemote = false
+                if resolved.app == "Spotify", seq == self.skipSeq { self.maybeRelock(freshURI: resolved.trackURI) }
+                self.apply(resolved)
+            }
         }
     }
 
@@ -162,17 +351,30 @@ final class MediaController: ObservableObject {
         }
 
         // Spotify "repeat one" emulation (Spotify's AppleScript has no native repeat-one).
-        if repeatMode == .one, np.app == "Spotify", !lockedURI.isEmpty, np.hasTrack {
+        // Nur mit bekannter URI, nur während der Wiedergabe und gedrosselt – sonst
+        // startet der Song bei veralteten Daten mehrfach neu.
+        if repeatMode == .one, np.app == "Spotify", !lockedURI.isEmpty, np.hasTrack, !np.trackURI.isEmpty {
             if np.trackURI != lockedURI {
-                spotify("play track \"\(lockedURI)\"")   // advanced off the song → replay it
-            } else if np.isPlaying, np.duration > 0, (np.duration - np.position) < 1.8 {
+                if np.isPlaying, Date().timeIntervalSince(lastReplay) > 2 {
+                    lastReplay = Date()
+                    spotify("play track \"\(lockedURI)\"")   // advanced off the song → replay it
+                }
+            } else if np.isPlaying, np.duration > 0, (np.duration - np.position) < 1.8,
+                      Date().timeIntervalSince(lastReplay) > 2 {
+                lastReplay = Date()
                 seekRaw(0)                                // near the end → loop back to start
             }
         }
 
+        // Apple-Music-Cover (AppleScript-Weg) genau einmal pro Titel laden – auch
+        // nach einem Wechsel von MediaRemote zurück auf denselben Titel.
+        if np.app == "Music", np.hasTrack, !lastSourceRemote, np.trackKey != musicArtKey {
+            musicArtKey = np.trackKey
+            loadMusicArtwork()
+        }
+
         if changed {
             lastKey = np.trackKey
-            if np.app == "Music" { loadMusicArtwork() }
             onTrackChanged?()
         }
     }
@@ -214,30 +416,55 @@ final class MediaController: ObservableObject {
     // MARK: - Transport controls
 
     func playPause() {
+        if usingRemote {
+            remote.send(.togglePlayPause)
+            let now = Date()
+            let cur = remoteSnap
+            optimistic = (!(cur?.playing ?? info.isPlaying), cur?.position(at: now) ?? info.position, now, now + 1.5)
+            if let s = remoteSnap { apply(nowPlaying(from: s)) }
+            return
+        }
         if info.isBrowser { browserCommand("var v=document.querySelector('video');if(v){if(v.paused){v.play()}else{v.pause()}}") }
         else { send("playpause") }
         refreshSoon()
     }
     func play() {
+        if usingRemote { remote.send(.play); return }
         if info.isBrowser { browserCommand("var v=document.querySelector('video');if(v){v.play()}") }
         else { send("play") }
         refreshSoon()
     }
     func pause() {
+        if usingRemote { remote.send(.pause); return }
         if info.isBrowser { browserCommand("var v=document.querySelector('video');if(v){v.pause()}") }
         else { send("pause") }
         refreshSoon()
     }
     func next() {
+        if usingRemote {
+            if info.isBrowser { seek(to: info.position + 10) }
+            // Spotify per AppleScript (seriell mit der URI-Abfrage) – nur wenn das
+            // nachweislich klappt; sonst (keine Automation-Freigabe) MediaRemote.
+            else if info.app == "Spotify", spotifyExtras != nil, !permissionDenied { send("next track"); deferRelock() }
+            else { remote.send(.nextTrack) }
+            return
+        }
         if info.isBrowser { browserCommand("var v=document.querySelector('video');if(v){v.currentTime=Math.min(v.duration||1e9,v.currentTime+10)}"); refreshSoon() }
         else { send("next track"); deferRelock() }
     }
     func previous() {
+        if usingRemote {
+            if info.isBrowser { seek(to: info.position - 10) }
+            else if info.app == "Spotify", spotifyExtras != nil, !permissionDenied { send("previous track"); deferRelock() }
+            else { remote.send(.previousTrack) }
+            return
+        }
         if info.isBrowser { browserCommand("var v=document.querySelector('video');if(v){v.currentTime=Math.max(0,v.currentTime-10)}"); refreshSoon() }
         else { send("previous track"); deferRelock() }
     }
     /// Skip to the next item — next video on YouTube, next track on Spotify/Music.
     func skipNext() {
+        if usingRemote, info.isBrowser { remote.send(.nextTrack); return }
         if info.isBrowser {
             browserCommand("var b=document.querySelector('.ytp-next-button');if(b&&b.getAttribute('aria-disabled')!=='true'){b.click()}else{var v=document.querySelector('video');if(v)v.currentTime=v.duration}")
             refreshSoon()
@@ -245,6 +472,7 @@ final class MediaController: ObservableObject {
     }
     /// Skip to the previous item — previous video on YouTube, previous track otherwise.
     func skipPrevious() {
+        if usingRemote, info.isBrowser { remote.send(.previousTrack); return }
         if info.isBrowser {
             browserCommand("var b=document.querySelector('.ytp-prev-button');if(b&&b.getAttribute('aria-disabled')!=='true'){b.click()}else{var v=document.querySelector('video');if(v)v.currentTime=0}")
             refreshSoon()
@@ -254,6 +482,13 @@ final class MediaController: ObservableObject {
 
     /// Seek to an absolute position (seconds) — used by the draggable scrubber.
     func seek(to seconds: Double) {
+        if usingRemote {
+            remote.seek(to: seconds)
+            let now = Date()
+            optimistic = (optimistic?.playing, max(0, seconds), now, now + 1.5)
+            if let s = remoteSnap { apply(nowPlaying(from: s)) } else { info.position = max(0, seconds) }
+            return
+        }
         if info.isBrowser { browserCommand("var v=document.querySelector('video');if(v){v.currentTime=\(Int(max(0, seconds)))}") }
         else { seekRaw(seconds) }
         info.position = max(0, seconds)   // optimistic
@@ -279,9 +514,18 @@ final class MediaController: ObservableObject {
         if info.app == "Music" {
             let v = mode == .off ? "off" : (mode == .one ? "one" : "all")
             musicCommand("set song repeat to \(v)")   // Music supports repeat-one natively
+        } else if usingRemote, info.app != "Spotify" {
+            remote.setRepeat(mode == .off ? 1 : (mode == .one ? 2 : 3))
         } else {
             spotify("set repeating to \(mode != .off)")
             lockedURI = mode == .one ? info.trackURI : ""   // Spotify: emulate repeat-one
+            if mode == .one, lockedURI.isEmpty {
+                // URI noch unbekannt (MediaRemote-Modus) → bei der ersten frischen sperren.
+                relockFrom = ""
+                relockDeadline = Date()
+            } else if mode != .one {
+                relockFrom = nil
+            }
         }
         refreshSoon()
     }
@@ -291,14 +535,26 @@ final class MediaController: ObservableObject {
         queue.async { [weak self] in _ = self?.runScript(src) }
     }
 
-    /// After a manual skip while in repeat-one, briefly disable the replay and re-lock.
+    /// After a manual skip while in repeat-one: disable the replay and re-lock on the
+    /// first *fresh* Spotify URI that differs from the old one (or after a timeout).
     private func deferRelock() {
         guard repeatMode == .one, info.app == "Spotify" else { refreshSoon(); return }
+        skipSeq &+= 1
+        // Läuft schon ein Relock (Doppel-Skip), den ursprünglichen Ausgangstitel behalten.
+        if relockFrom == nil || relockFrom?.isEmpty == true {
+            relockFrom = lockedURI.isEmpty ? info.trackURI : lockedURI
+        }
+        relockDeadline = Date().addingTimeInterval(2.5)
         lockedURI = ""
         refreshSoon()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            guard let self, self.repeatMode == .one else { return }
-            self.lockedURI = self.info.trackURI
+    }
+
+    /// Nur mit frisch per AppleScript gelesenen Spotify-Daten aufrufen.
+    private func maybeRelock(freshURI uri: String) {
+        guard let from = relockFrom, repeatMode == .one, !uri.isEmpty else { return }
+        if uri != from || Date() > relockDeadline {
+            lockedURI = uri
+            relockFrom = nil
         }
     }
 
@@ -603,11 +859,15 @@ final class MediaController: ObservableObject {
             guard let self else { return }
             let ok = self.runScript(src) == "ok"
             guard ok, let image = NSImage(contentsOfFile: path) else {
-                DispatchQueue.main.async { self.artwork = nil; self.accent = Color(white: 0.4) }
+                DispatchQueue.main.async {
+                    guard !self.lastSourceRemote else { return }   // inzwischen MediaRemote
+                    self.artwork = nil; self.accent = Color(white: 0.4)
+                }
                 return
             }
             let color = Self.dominantColor(of: image)
             DispatchQueue.main.async {
+                guard !self.lastSourceRemote else { return }
                 self.artwork = image
                 self.accent = color
             }
@@ -624,6 +884,8 @@ final class MediaController: ObservableObject {
             guard let self, let data, let image = NSImage(data: data) else { return }
             let color = Self.dominantColor(of: image)
             DispatchQueue.main.async {
+                // Verspätet? (anderer Titel oder inzwischen MediaRemote)
+                guard !self.lastSourceRemote, self.lastArtworkURL == urlString else { return }
                 self.artwork = image
                 self.accent = color
             }

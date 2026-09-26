@@ -6,6 +6,18 @@ A native macOS app that recreates the iPhone's Dynamic Island on the MacBook Pro
 
 Built with SwiftUI and AppKit, it ships as a Swift Package and builds with the Command Line Tools alone — no Xcode required.
 
+## What's new in 2.0
+
+- **Stays put when switching desktops** — the island lives in its own private WindowServer space at the highest absolute level, so it no longer slides along with Mission Control / three-finger swipes.
+- **Invisible in screenshots and screen recordings** — the window is excluded from capture (`sharingType = .none`, verified against ScreenCaptureKit on macOS 26), and in its idle state it draws nothing at all.
+- **Apple-style presentations** — hidden → *lip* (the notch swells slightly under the cursor) → compact live activity → banner → expanded, with a bouncy open spring, a critically damped close, and blur/scale content transitions.
+- **New live activities** — volume and brightness HUD (optionally replaces the system HUD via Accessibility), headphones/AirPods connected banner with L/R/Case battery, camera/microphone-in-use indicator, unlock animation, low-battery alerts, new-song banner, timer-finished banner.
+- **System-wide Now Playing** — any app (Spotify, Music, Podcasts, browser videos, VLC …) with cover art via Apple's MediaRemote, using the open-source [mediaremote-adapter](https://github.com/ungive/mediaremote-adapter) (BSD-3, vendored in `Vendor/`, built from source by `build.sh`). Falls back to AppleScript automatically if macOS blocks it.
+- **Battery of your other Apple devices** — iPhone/iPad via Instant Hotspot (coarse, zero setup), exact values and the Apple Watch via the Mac's existing USB/Wi-Fi pairing (MobileDevice), and AirPods connected to your iPhone via their Bluetooth advertisements (after granting Bluetooth). Values come from nearby devices, not iCloud, and are kept with their age for 14 days.
+- **Overview tab** — music, next event, timer/weather and battery at a glance.
+- **Gestures & feel** — two-finger pull-down opens, horizontal swipe switches tabs (or tracks on the music activity), click an activity to open its tab, hover delay, click-to-open mode, trackpad haptics.
+- **Cleaner code** — all services live in one `IslandServices` container instead of being threaded through every initializer; system integrations are in `Platform/`.
+
 ## Features
 
 - **Native Dynamic Island** that wraps around the real MacBook Pro notch and morphs between collapsed, compact, and expanded states with spring animation.
@@ -74,9 +86,25 @@ The assistant works two ways:
 
 ### Permissions
 
-On first use, macOS will prompt for Automation (Spotify/Music/Calendar), Camera (mirror tab), and Microphone (recording). Because the app is ad-hoc signed, these prompts may reappear after each rebuild.
+On first use, macOS will prompt for Automation (Spotify/Music/Calendar), Camera (mirror tab), and Microphone (recording). Showing AirPods that are connected to your iPhone needs **Bluetooth** (Devices tab → “Bluetooth erlauben”). Replacing the system volume/brightness HUD additionally needs **Accessibility** (Settings → Activities → “Allow…”). Because the app is ad-hoc signed, these grants may need to be renewed after each rebuild.
 
 ## Screenshots
+
+<p align="center">
+  <img src="Screenshots/v2_home.png" width="460"><br>
+  <sub><b>Overview</b> — music, next event, timer and battery at a glance</sub>
+</p>
+
+<table align="center">
+  <tr>
+    <td align="center"><img src="Screenshots/v2_banner_airpods.png" width="300"><br><sub>AirPods connected</sub></td>
+    <td align="center"><img src="Screenshots/v2_banner_track.png" width="300"><br><sub>New song</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="Screenshots/v2_volume_hud.png" width="300"><br><sub>Volume HUD</sub></td>
+    <td align="center"><img src="Screenshots/v2_privacy.png" width="300"><br><sub>Camera in use</sub></td>
+  </tr>
+</table>
 
 <p align="center">
   <img src="Screenshots/4_expanded_music.png" width="460"><br>

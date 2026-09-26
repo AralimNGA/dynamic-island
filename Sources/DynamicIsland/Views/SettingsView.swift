@@ -1,22 +1,26 @@
 import SwiftUI
 import AppKit
 import ServiceManagement
+import Combine
 
 /// Native, Apple-style preferences window (segmented toolbar tabs).
 struct SettingsView: View {
     @ObservedObject var settings = AppSettings.shared
     @ObservedObject var claude: ClaudeService
     @ObservedObject var media: MediaController
+    let services: IslandServices
+    weak var app: AppDelegate?
 
     var body: some View {
         TabView {
-            assistantTab.tabItem { Label("Assistent", systemImage: "sparkles") }
-            musicTab.tabItem { Label("Musik", systemImage: "music.note.list") }
+            generalTab.tabItem { Label("Allgemein", systemImage: "gearshape") }
+            activitiesTab.tabItem { Label("Aktivitäten", systemImage: "capsule.fill") }
             appearanceTab.tabItem { Label("Darstellung", systemImage: "paintpalette") }
             tabsTab.tabItem { Label("Tabs", systemImage: "square.grid.2x2") }
-            generalTab.tabItem { Label("Allgemein", systemImage: "gearshape") }
+            musicTab.tabItem { Label("Musik", systemImage: "music.note.list") }
+            assistantTab.tabItem { Label("Assistent", systemImage: "sparkles") }
         }
-        .frame(width: 500, height: 400)
+        .frame(width: 540, height: 520)
     }
 
     // MARK: Assistant
@@ -79,6 +83,22 @@ struct SettingsView: View {
 
     private var musicTab: some View {
         Form {
+            Section {
+                Toggle("Systemweit (jede App: Podcasts, Browser, VLC …)", isOn: $settings.systemNowPlaying)
+                    .onChange(of: settings.systemNowPlaying) { _, on in media.setSystemWide(on) }
+                HStack(spacing: 6) {
+                    Image(systemName: media.systemWide ? "checkmark.seal.fill" : "applescript")
+                        .foregroundStyle(media.systemWide ? .green : .secondary)
+                    Text(media.systemWide ? "MediaRemote aktiv" : "AppleScript (Spotify, Musik, Browser)")
+                        .foregroundStyle(.secondary)
+                }
+                .font(.callout)
+            } header: {
+                Text("Quelle")
+            } footer: {
+                Text("Systemweit nutzt den quelloffenen mediaremote-adapter (Vendor/). Falls macOS den Zugriff sperrt, fällt die App automatisch auf AppleScript zurück.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section {
                 if settings.playlists.isEmpty {
                     Text("Noch keine Playlists").foregroundStyle(.secondary)
@@ -190,6 +210,70 @@ struct SettingsView: View {
         .padding(.top, 4)
     }
 
+    // MARK: Aktivitäten
+
+    @State private var axTrusted = KeyInterceptor.isTrusted
+    private let axTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
+
+    private var activitiesTab: some View {
+        Form {
+            Section {
+                Toggle("Neuer Titel als Mitteilung", isOn: $settings.trackBanner)
+                Toggle("Kopfhörer / Ausgabegerät verbunden", isOn: $settings.deviceBanner)
+                Toggle("Kamera- und Mikrofon-Anzeige", isOn: $settings.showPrivacyIndicator)
+                Toggle("Entsperren-Animation", isOn: $settings.unlockAnimation)
+                Toggle("Akku-Warnungen (20 %, 10 %, 5 %, voll)", isOn: $settings.batteryAlerts)
+            } header: {
+                Text("Live-Aktivitäten")
+            } footer: {
+                Text("Wie auf dem iPhone: Kleine Anzeigen links und rechts der Kamera, Mitteilungen wachsen kurz unter der Notch heraus.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section {
+                Toggle("iPhone & iPad über Instant Hotspot (grob, ohne Einrichtung)", isOn: $settings.remoteBatteryHotspot)
+                    .onChange(of: settings.remoteBatteryHotspot) { services.remoteBattery.applySettings() }
+                Toggle("AirPods in der Nähe über Bluetooth", isOn: $settings.remoteBatteryBLE)
+                    .onChange(of: settings.remoteBatteryBLE) { _, on in
+                        if on { services.remoteBattery.enableBluetooth() } else { services.remoteBattery.applySettings() }
+                    }
+                Toggle("Genaue Werte über Kabel-Kopplung (iPhone, iPad, Apple Watch)", isOn: $settings.remoteBatteryLockdown)
+                    .onChange(of: settings.remoteBatteryLockdown) { services.remoteBattery.applySettings() }
+            } header: {
+                Text("Akku anderer Geräte")
+            } footer: {
+                Text("Werte kommen direkt von Geräten in der Nähe (Bluetooth/WLAN), nicht aus iCloud. Für genaue Prozente und die Apple Watch: iPhone bzw. iPad einmal per Kabel an diesen Mac anschliessen, „Vertrauen“ tippen und im Finder „Im WLAN anzeigen“ aktivieren.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section {
+                Toggle("Lautstärke-Anzeige in der Island", isOn: $settings.volumeHUD)
+                Toggle("System-HUD ersetzen (Lautstärke + Helligkeit)", isOn: $settings.replaceSystemHUD)
+                HStack(spacing: 6) {
+                    Image(systemName: axTrusted ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                        .foregroundStyle(axTrusted ? .green : .orange)
+                    Text(axTrusted ? "Bedienungshilfen erlaubt" : "Bedienungshilfen noch nicht erlaubt")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if !axTrusted {
+                        Button("Erlauben …") {
+                            KeyInterceptor.requestTrust()
+                            open("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+                            app?.startKeyInterceptor(prompt: false)
+                        }
+                    }
+                }
+                .font(.callout)
+            } header: {
+                Text("Lautstärke und Helligkeit")
+            } footer: {
+                Text("Ohne Freigabe zeigt die Island die Lautstärke zusätzlich zum System-HUD. Mit „Bedienungshilfen“ ersetzt sie es ganz (auch Helligkeit, ⇧⌥ für feine Schritte). Nach jedem Neubau muss die Freigabe erneut gesetzt werden (Ad-hoc-Signatur).")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+        .padding(.top, 4)
+        .onReceive(axTimer) { _ in axTrusted = KeyInterceptor.isTrusted }
+    }
+
     // MARK: General
 
     @State private var launchAtLogin = SettingsView.loginEnabled()
@@ -199,6 +283,30 @@ struct SettingsView: View {
             Section {
                 Toggle("Beim Anmelden starten", isOn: $launchAtLogin)
                     .onChange(of: launchAtLogin) { _, newValue in setLogin(newValue) }
+            }
+            Section {
+                Picker("Öffnen", selection: $settings.openOnHover) {
+                    Text("Beim Darüberfahren").tag(true)
+                    Text("Per Klick").tag(false)
+                }
+                .pickerStyle(.segmented)
+                if settings.openOnHover {
+                    LabeledContent("Verzögerung") {
+                        HStack {
+                            Slider(value: $settings.hoverDelay, in: 0...0.6, step: 0.05)
+                            Text("\(Int(settings.hoverDelay * 1000)) ms")
+                                .monospacedDigit().foregroundStyle(.secondary).frame(width: 56, alignment: .trailing)
+                        }
+                    }
+                }
+                Toggle("Haptisches Feedback (Trackpad)", isOn: $settings.haptics)
+                Toggle("In Screenshots und Aufnahmen ausblenden", isOn: $settings.hideInScreenshots)
+                    .onChange(of: settings.hideInScreenshots) { app?.applyCaptureSetting() }
+            } header: {
+                Text("Verhalten")
+            } footer: {
+                Text("Gesten auf der Island: zwei Finger nach unten ziehen öffnet, links/rechts wischen wechselt Tab bzw. Titel. Klick auf eine Aktivität öffnet den passenden Tab.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Section {
                 TextField("Symbole, z.B. AAPL, MSFT, NVDA", text: stockSymbolsBinding)
@@ -217,7 +325,7 @@ struct SettingsView: View {
                 }
             }
             Section {
-                LabeledContent("Version", value: "1.0")
+                LabeledContent("Version", value: "2.0")
                 Button("Beenden") { NSApp.terminate(nil) }
             }
         }
@@ -262,11 +370,12 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     static let shared = SettingsWindowController()
     private var window: NSWindow?
 
-    func show(claude: ClaudeService, media: MediaController) {
+    func show(services: IslandServices, app: AppDelegate?) {
         NSApp.setActivationPolicy(.regular)
 
         if window == nil {
-            let hosting = NSHostingController(rootView: SettingsView(claude: claude, media: media))
+            let hosting = NSHostingController(rootView: SettingsView(claude: services.claude, media: services.media,
+                                                                     services: services, app: app))
             let w = NSWindow(contentViewController: hosting)
             w.title = "Dynamic Island – Einstellungen"
             w.styleMask = [.titled, .closable, .miniaturizable]

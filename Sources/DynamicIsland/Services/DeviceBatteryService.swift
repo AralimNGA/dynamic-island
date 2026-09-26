@@ -18,6 +18,8 @@ final class DeviceBatteryService: ObservableObject {
 
     @Published var devices: [Device] = []
     @Published var loading = false
+    /// Alle gekoppelten Apple-Kopfhörer (verbunden oder nicht) – für den AirPods-Scanner.
+    @Published var pairedAudio: [PairedAudioDevice] = []
 
     private struct Cached: Codable { let symbol: String; let readings: [Reading]; let lastSeen: Date }
     private var cache: [String: Cached] = [:]
@@ -29,9 +31,12 @@ final class DeviceBatteryService: ObservableObject {
         loading = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
-            let live = Self.parse(Self.runProfiler())
+            let json = Self.runProfiler()
+            let live = Self.parse(json)
+            let paired = Self.parsePairedAudio(json)
             DispatchQueue.main.async {
                 self.rebuild(live: live)
+                if let paired, paired != self.pairedAudio { self.pairedAudio = paired }
                 self.loading = false
             }
         }
@@ -113,6 +118,30 @@ final class DeviceBatteryService: ObservableObject {
             }
         }
         return out
+    }
+
+    /// Apple-Kopfhörer aus „verbunden“ und „nicht verbunden“ (Produkt-ID + Adresse).
+    /// nil = system_profiler lieferte nichts Brauchbares (alte Liste behalten).
+    private static func parsePairedAudio(_ json: [String: Any]?) -> [PairedAudioDevice]? {
+        guard let arr = json?["SPBluetoothDataType"] as? [[String: Any]] else { return nil }
+        var out: [PairedAudioDevice] = []
+        for section in arr {
+            for key in ["device_connected", "device_not_connected"] {
+                guard let list = section[key] as? [[String: Any]] else { continue }
+                for entry in list {
+                    for (name, val) in entry {
+                        guard let f = val as? [String: Any],
+                              (f["device_vendorID"] as? String)?.lowercased() == "0x004c",
+                              (f["device_minorType"] as? String) == "Headphones",
+                              let pidStr = f["device_productID"] as? String,
+                              let pid = UInt16(pidStr.lowercased().replacingOccurrences(of: "0x", with: ""), radix: 16),
+                              let addr = f["device_address"] as? String else { continue }
+                        out.append(PairedAudioDevice(name: name, productID: pid, address: addr))
+                    }
+                }
+            }
+        }
+        return out.sorted { $0.name < $1.name }
     }
 
     private static func pct(_ s: String) -> Int? {
